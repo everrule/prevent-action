@@ -1,0 +1,92 @@
+name: "EverRule Prevent"
+description: "Runs the approved prevention contracts in .everrule/contracts whose scope this change touches, using the repository's own test runners. Never calls an external service."
+author: "EverRule"
+inputs:
+  mode:
+    description: "evaluate (the required everrule check) or verify (proves each draft's test fails at its base commit and passes at its merge commit)"
+    default: "evaluate"
+  working-directory:
+    description: "Directory the contracts' paths are relative to: the repository root, or a service folder in a monorepo"
+    default: "."
+  contracts-dir:
+    description: "Directory holding prevention contracts, relative to working-directory"
+    default: ".everrule/contracts"
+  base-ref:
+    description: "Base commit to diff against and to read approved contracts from"
+    default: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || 'origin/main' }}
+  install-command:
+    description: "verify mode: the command that installs dependencies, run in each worktree (the broken and fixed commits) from that revision's own lockfile. Empty links the current checkout's node_modules instead, which the evidence records as a limitation."
+    default: ""
+  timeout-minutes:
+    description: "Time limit for each contract's test; a test still running is stopped and reported as an infrastructure error (exit 3, TIMEOUT)"
+    default: "10"
+outputs:
+  status:
+    description: "pass | behavior_fail | integrity_fail | infra_error | no_applicable_contracts (exit 0, 1 behavior_fail, 2 integrity_fail, 3 infra_error)"
+    value: ${{ steps.evaluate.outputs.status }}
+runs:
+  using: "composite"
+  steps:
+    # Inputs reach the shell through env, never by template expansion inside the script.
+    - name: Check mode
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+      run: |
+        rm -f "$RUNNER_TEMP/everrule-evaluation.json" "$RUNNER_TEMP/everrule-changed.txt" "$RUNNER_TEMP/everrule-verification.json"
+        case "$MODE" in
+          evaluate|verify) ;;
+          *) echo "::error::unknown mode '$MODE' (expected evaluate or verify)"; exit 3 ;;
+        esac
+    - name: Verify drafts
+      if: inputs.mode == 'verify'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CONTRACTS_DIR: ${{ inputs.contracts-dir }}
+        INSTALL_COMMAND: ${{ inputs.install-command }}
+      run: |
+        # Exit 0 whenever the protocol completed: whether a draft reproduces is in the evidence, which EverRule classifies.
+        node "$GITHUB_ACTION_PATH/dist/everrule-evaluate.mjs" verify --contracts "$CONTRACTS_DIR" ${INSTALL_COMMAND:+--install "$INSTALL_COMMAND"} --out "$RUNNER_TEMP/everrule-verification.json"
+    - name: Upload verification record
+      if: always() && inputs.mode == 'verify'
+      uses: actions/upload-artifact@v4
+      with:
+        name: everrule-verification
+        path: ${{ runner.temp }}/everrule-verification.json
+        if-no-files-found: ignore
+    - name: Changed files
+      if: inputs.mode == 'evaluate'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        BASE_REF: ${{ inputs.base-ref }}
+      run: |
+        git fetch --no-tags --depth=200 origin "$BASE_REF" 2>/dev/null || true
+        # --relative: paths relative to working-directory, matching the contracts' scope globs.
+        git diff --name-only --relative "$BASE_REF...HEAD" > "$RUNNER_TEMP/everrule-changed.txt" || git diff --name-only --relative HEAD~1 > "$RUNNER_TEMP/everrule-changed.txt"
+        echo "Changed files:"; cat "$RUNNER_TEMP/everrule-changed.txt"
+    - name: Evaluate prevention contracts
+      if: inputs.mode == 'evaluate'
+      id: evaluate
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CONTRACTS_DIR: ${{ inputs.contracts-dir }}
+        BASE_REF: ${{ inputs.base-ref }}
+        TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
+      run: |
+        set +e
+        node "$GITHUB_ACTION_PATH/dist/everrule-evaluate.mjs" --contracts "$CONTRACTS_DIR" --changed-files "$RUNNER_TEMP/everrule-changed.txt" --base "$BASE_REF" --timeout "$TIMEOUT_MINUTES" --event "$GITHUB_EVENT_PATH" --out "$RUNNER_TEMP/everrule-evaluation.json"
+        code=$?
+        # No record means the evaluator could not finish: an infrastructure error, never a pass.
+        status=$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).status)" "$RUNNER_TEMP/everrule-evaluation.json" 2>/dev/null || echo "infra_error")
+        echo "status=$status" >> "$GITHUB_OUTPUT"
+        exit $code
+    - name: Upload evaluation record
+      uses: actions/upload-artifact@v4
+      if: always() && inputs.mode == 'evaluate'
+      with:
+        name: everrule-evaluation
+        path: ${{ runner.temp }}/everrule-evaluation.json
+        if-no-files-found: ignore

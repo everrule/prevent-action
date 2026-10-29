@@ -1,0 +1,26 @@
+# Copy to .github/workflows/everrule.yml. EverRule's first pull request to a
+# repository adds this file; the customer then requires the `everrule` check on
+# the default branch's ruleset, with code-owner review.
+name: everrule
+on:
+  pull_request:                  # no paths filter: a required check must always report
+  merge_group:                   # repositories with a merge queue
+  push:
+    branches: ["everrule/**"]    # verification of a draft before its pull request opens
+jobs:
+  everrule:                      # stable name; this is the check the customer requires
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: everrule/prevent-action@v1
+        with: { mode: evaluate }
+  everrule-verify:               # never required; proves a draft before approval
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: everrule/prevent-action@v1
+        with: { mode: verify }

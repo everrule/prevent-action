@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/everrule/prevent-action/blob/v1/schema/everrule-backlog.v1.json",
+  "title": "EverRule incident backlog v1",
+  "description": ".everrule/backlog.json: which incidents count toward coverage. Incident keys, pull request numbers and short reasons only; never report text, customer names or identifiers. Structure only: the evaluator also checks that each key is listed once, that no incident supersedes itself, and that updated_at is a real calendar date. Not on the merge path: an invalid file is a warning in the evaluation record.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "incidents"],
+  "properties": {
+    "schema": { "const": "everrule-backlog/v1" },
+    "incidents": { "type": "array", "items": { "$ref": "#/$defs/incident" } }
+  },
+  "$defs": {
+    "incidentKey": { "type": "string", "pattern": "^[A-Z][A-Z0-9]{1,15}-\\d{1,9}$" },
+    "incident": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "eligibility", "updated_at"],
+      "properties": {
+        "key": { "$ref": "#/$defs/incidentKey" },
+        "eligibility": { "enum": ["PENDING_REVIEW", "ELIGIBLE", "UNSUITABLE", "SUPERSEDED"] },
+        "reason_code": { "enum": ["NON_DETERMINISTIC_EXTERNAL", "NOT_EXPRESSIBLE_AS_TEST", "CONFIG_OR_INFRA_ONLY", "FIX_NOT_IN_REPO", "UNSUPPORTED_RUNNER", "OTHER"] },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "fix_pr": { "type": "integer", "minimum": 1, "description": "The fix pull request's number in this repository; absent when the fix is elsewhere." },
+        "contract": { "type": "string", "pattern": "^ER-[A-Z]+-\\d{3,}$" },
+        "superseded_by": { "$ref": "#/$defs/incidentKey" },
+        "updated_at": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(?::\\d{2}(?:\\.\\d+)?)?(?:Z|[+-]\\d{2}:\\d{2})$" }
+      },
+      "allOf": [
+        { "if": { "properties": { "eligibility": { "const": "UNSUITABLE" } } }, "then": { "required": ["reason_code", "reason"] }, "else": { "properties": { "reason_code": false } } },
+        { "if": { "properties": { "eligibility": { "const": "SUPERSEDED" } } }, "then": { "required": ["superseded_by"] }, "else": { "properties": { "superseded_by": false } } }
+      ]
+    }
+  }
+}

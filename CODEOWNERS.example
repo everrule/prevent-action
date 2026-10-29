@@ -1,0 +1,5 @@
+# Add to .github/CODEOWNERS and require code-owner review on the default branch.
+# A pull request can recompute a contract's hash, so this review is what actually
+# stops a protection being loosened. Replace the team with the service owner.
+/.everrule/                      @your-org/payments-platform
+/.github/workflows/everrule.yml  @your-org/payments-platform

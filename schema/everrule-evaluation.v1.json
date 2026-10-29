@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/everrule/prevent-action/blob/v1/schema/everrule-evaluation.v1.json",
+  "title": "EverRule evaluation record v1",
+  "description": "Written by every run of the everrule check and uploaded as the everrule-evaluation artifact. status sets the exit code: integrity_fail 2, infra_error 3, behavior_fail 1, pass and no_applicable_contracts 0.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "evaluator_version", "event", "evaluated_at", "changed_files", "applicable", "not_applicable", "skipped_unapproved", "integrity", "warnings", "backlog", "status"],
+  "properties": {
+    "schema": { "const": "everrule-evaluation/v1" },
+    "evaluator_version": { "type": "string", "minLength": 1 },
+    "event": {
+      "description": "The event that started the run, copied from the payload at GITHUB_EVENT_PATH; null outside GitHub Actions.",
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/event" }]
+    },
+    "evaluated_at": { "type": "string" },
+    "changed_files": { "type": "array", "items": { "type": "string" } },
+    "applicable": { "type": "array", "items": { "$ref": "#/$defs/contractResult" } },
+    "not_applicable": { "type": "array", "items": { "type": "string" } },
+    "skipped_unapproved": { "type": "array", "items": { "type": "string" } },
+    "integrity": { "type": "array", "items": { "$ref": "#/$defs/integrityProblem" } },
+    "warnings": { "type": "array", "items": { "type": "string" }, "description": "Applicable contracts that failed inside their burn-in; reported, not failing." },
+    "backlog": {
+      "description": ".everrule/backlog.json, validated when present. Never affects status or the exit code.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "problems"],
+      "properties": {
+        "status": { "enum": ["absent", "valid", "invalid"] },
+        "problems": { "type": "array", "items": { "type": "string" }, "maxItems": 20 }
+      }
+    },
+    "status": { "enum": ["pass", "behavior_fail", "infra_error", "integrity_fail", "no_applicable_contracts"] }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "gitSha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+    "nullableGitSha": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/gitSha" }] },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "pull_request", "pr_labels", "base_sha", "head_sha", "merge_group"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "pull_request": { "oneOf": [{ "type": "null" }, { "type": "integer", "minimum": 1 }] },
+        "pr_labels": { "type": "array", "items": { "type": "string" }, "description": "The pull request's labels when the run started. everrule:rehearsal marks a rehearsal. Empty for a merge_group run, whose payload has no labels." },
+        "base_sha": { "$ref": "#/$defs/nullableGitSha" },
+        "head_sha": { "$ref": "#/$defs/nullableGitSha" },
+        "merge_group": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "object", "additionalProperties": false, "required": ["base_ref", "head_ref"], "properties": { "base_ref": { "type": "string" }, "head_ref": { "type": "string" } } }
+          ]
+        }
+      }
+    },
+    "contractResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "contract_hash", "approved_hash", "test_hash", "hash_algorithm", "test", "runner", "result", "detail", "exit_code", "tests_executed", "tests_failed", "failed_cases", "matched_paths", "duration_ms"],
+      "properties": {
+        "id": { "type": "string" },
+        "version": { "type": "integer", "minimum": 1 },
+        "contract_hash": { "$ref": "#/$defs/sha256", "description": "The contract hash the evaluator computed." },
+        "approved_hash": { "$ref": "#/$defs/sha256", "description": "approval.contract_hash as committed." },
+        "test_hash": { "$ref": "#/$defs/sha256", "description": "test.sha256 as committed." },
+        "hash_algorithm": { "enum": ["sha256"] },
+        "test": { "type": "string" },
+        "runner": { "enum": ["node-test", "vitest", "jest", "pytest"] },
+        "result": { "enum": ["PASS", "BEHAVIOR_FAIL", "INFRA_ERROR"], "description": "BEHAVIOR_FAIL only when the runner's report shows the test ran and a test case failed." },
+        "subtype": { "enum": ["RUNNER_CRASH", "DEPENDENCY_OR_SETUP", "TIMEOUT", "NO_REPORT"] },
+        "detail": { "type": "string" },
+        "exit_code": { "oneOf": [{ "type": "null" }, { "type": "integer" }] },
+        "tests_executed": { "type": "integer", "minimum": 0 },
+        "tests_failed": { "type": "integer", "minimum": 0 },
+        "failed_cases": { "type": "array", "items": { "type": "string" }, "maxItems": 20 },
+        "matched_paths": { "type": "array", "items": { "type": "string" } },
+        "duration_ms": { "type": "number", "minimum": 0 },
+        "advisory_until": { "type": "string" }
+      }
+    },
+    "integrityProblem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "problem", "detail"],
+      "properties": {
+        "id": { "type": "string" },
+        "problem": { "enum": ["contract_hash_mismatch", "test_hash_mismatch", "test_missing", "removed_without_retiring", "base_unreadable"] },
+        "detail": { "type": "string" }
+      }
+    }
+  }
+}

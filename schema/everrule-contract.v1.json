@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/everrule/prevent-action/blob/v1/schema/everrule-contract.v1.json",
+  "title": "EverRule prevention contract v1",
+  "description": "A prevention contract under .everrule/contracts. Structure only: the evaluator also checks that timestamps are real calendar dates, that enforcement.advisory_until is at most 14 days after approval.approved_at and not before it, that a contract does not supersede itself, and that the behavior block matches its Behavioral Profile.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "failure_class", "requirement", "scope", "test", "approval"],
+  "properties": {
+    "$schema": { "type": "string", "description": "Editor metadata; not part of the contract hash." },
+    "schema": { "const": "everrule-contract/v1", "description": "Absent reads as everrule-contract/v1." },
+    "hash_algorithm": { "enum": ["sha256"], "description": "The algorithm behind approval.contract_hash and test.sha256. Absent reads as sha256." },
+    "id": { "$ref": "#/$defs/contractId" },
+    "version": { "type": "integer", "minimum": 1 },
+    "origin": { "enum": ["incident", "team"], "description": "Absent reads as incident." },
+    "incident": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "occurred_at": { "type": "string" },
+        "severity": { "type": "string" },
+        "report_ref": { "type": "string" },
+        "postmortem_ref": { "type": "string", "description": "Older name for report_ref, still read." },
+        "fix_pr": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9+.-]*://" }
+      }
+    },
+    "failure_class": {
+      "enum": ["duplicate_side_effect", "authorization_boundary", "cross_tenant_access", "threshold_approval", "state_transition", "ordering_failure", "stale_state", "webhook_replay", "partial_transaction", "schema_assumption", "migration_incompatibility", "other"]
+    },
+    "behavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "operation", "inputs", "preconditions", "observation", "expectations", "execution"],
+      "properties": {
+        "profile": {
+          "type": "object", "additionalProperties": false, "required": ["id", "version"],
+          "properties": { "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$" }, "version": { "type": "integer", "minimum": 1 } }
+        },
+        "operation": { "$ref": "#/$defs/dotted" },
+        "inputs": {
+          "type": "object", "additionalProperties": false, "required": ["request_type", "identity_type"],
+          "properties": { "request_type": { "$ref": "#/$defs/ident" }, "identity_type": { "$ref": "#/$defs/ident" } }
+        },
+        "preconditions": {
+          "type": "object", "additionalProperties": false, "required": ["request_is_valid", "initial_successful_effect_count"],
+          "properties": { "request_is_valid": { "type": "boolean" }, "initial_successful_effect_count": { "type": "integer", "minimum": 0 } }
+        },
+        "observation": {
+          "type": "object", "additionalProperties": false, "required": ["concept", "measure", "correlation"],
+          "properties": { "concept": { "$ref": "#/$defs/dotted" }, "measure": { "$ref": "#/$defs/ident" }, "correlation": { "$ref": "#/$defs/ident" } }
+        },
+        "expectations": {
+          "type": "object", "additionalProperties": false, "required": ["after_first_invocation", "after_repeat_invocation", "first_outcome", "repeat_outcome"],
+          "properties": {
+            "after_first_invocation": { "type": "integer", "minimum": 0 },
+            "after_repeat_invocation": { "type": "integer", "minimum": 0 },
+            "first_outcome": { "$ref": "#/$defs/ident" },
+            "repeat_outcome": { "$ref": "#/$defs/ident" }
+          }
+        },
+        "execution": {
+          "type": "object", "additionalProperties": false, "required": ["ordering", "completion", "isolation", "effects_visibility", "side_effect_environment"],
+          "properties": {
+            "ordering": { "$ref": "#/$defs/ident" }, "completion": { "$ref": "#/$defs/ident" }, "isolation": { "$ref": "#/$defs/ident" },
+            "effects_visibility": { "$ref": "#/$defs/ident" }, "side_effect_environment": { "$ref": "#/$defs/ident" }
+          }
+        }
+      }
+    },
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["statement"],
+      "properties": {
+        "statement": { "type": "string", "minLength": 1 },
+        "assumptions": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paths"],
+      "properties": {
+        "paths": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "dependencies": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "test": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "runner", "required"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "pattern": "^(?![a-zA-Z]:)(?![\\\\/])(?!(?:.*[\\\\/])?\\.\\.(?:[\\\\/]|$)).+$", "description": "Relative to the repository root, never absolute, never climbing out with .." },
+        "runner": { "enum": ["node-test", "vitest", "jest", "pytest"] },
+        "required": { "const": true },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "enforcement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "advisory_until": { "$ref": "#/$defs/timestamp" } }
+    },
+    "verification_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base", "merge"],
+      "properties": { "base": { "$ref": "#/$defs/gitSha" }, "merge": { "$ref": "#/$defs/gitSha" } }
+    },
+    "verification": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "broken_revision", "broken_result", "fixed_revision", "fixed_result", "verified_at"],
+          "properties": {
+            "mode": { "const": "exact" },
+            "broken_revision": { "type": "string", "minLength": 7 },
+            "broken_result": { "const": "fail" },
+            "fixed_revision": { "type": "string", "minLength": 7 },
+            "fixed_result": { "const": "pass" },
+            "verified_at": { "type": "string" },
+            "case_set_digest": { "type": "string" },
+            "binding_set_digest": { "type": "string" },
+            "intent_digest": { "type": "string" },
+            "candidate_digest": { "type": "string" },
+            "verification_protocol_version": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "limitation", "verified_at"],
+          "properties": {
+            "mode": { "const": "effect_boundary" },
+            "limitation": { "type": "string", "minLength": 1 },
+            "fixed_revision": { "type": "string", "minLength": 7 },
+            "verified_at": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "basis", "verified_at"],
+          "properties": {
+            "mode": { "const": "asserted" },
+            "basis": { "type": "string", "minLength": 1 },
+            "verified_at": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "loopholes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "result"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "result": { "enum": ["holds", "loophole", "owner_decides"] },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["draft", "approved", "rejected", "retired"] },
+        "approver_name": { "type": "string" },
+        "approver_role": { "type": "string" },
+        "approved_at": { "$ref": "#/$defs/timestamp" },
+        "rationale": { "type": "string" },
+        "contract_hash": { "$ref": "#/$defs/sha256" },
+        "superseded_by": { "$ref": "#/$defs/contractId" }
+      }
+    },
+    "ownership": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "accountable_team": { "type": "string" }, "review_due": { "type": "string" } }
+    }
+  },
+  "allOf": [
+    {
+      "description": "An incident contract (origin absent or incident) names its incident.",
+      "if": { "required": ["origin"], "properties": { "origin": { "const": "team" } } },
+      "then": true,
+      "else": { "required": ["incident"] }
+    },
+    {
+      "description": "asserted verification is only for team-written contracts.",
+      "if": { "required": ["verification"], "properties": { "verification": { "required": ["mode"], "properties": { "mode": { "const": "asserted" } } } } },
+      "then": { "required": ["origin"], "properties": { "origin": { "const": "team" } } }
+    },
+    {
+      "description": "An approved contract names who approved it, when, the exact contract and the exact test, and how it was verified.",
+      "if": { "properties": { "approval": { "properties": { "status": { "const": "approved" } } } } },
+      "then": {
+        "required": ["verification"],
+        "properties": {
+          "approval": { "required": ["approver_name", "approver_role", "approved_at", "contract_hash"], "properties": { "approver_name": { "minLength": 1 }, "approver_role": { "minLength": 1 } } },
+          "test": { "required": ["sha256"] }
+        }
+      }
+    },
+    {
+      "description": "superseded_by only with status retired.",
+      "if": { "properties": { "approval": { "required": ["superseded_by"] } } },
+      "then": { "properties": { "approval": { "properties": { "status": { "const": "retired" } } } } }
+    }
+  ],
+  "$defs": {
+    "contractId": { "type": "string", "pattern": "^ER-[A-Z]+-\\d{3,}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "gitSha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+    "timestamp": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(?::\\d{2}(?:\\.\\d+)?)?(?:Z|[+-]\\d{2}:\\d{2})$" },
+    "ident": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+    "dotted": { "type": "string", "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$" }
+  }
+}
