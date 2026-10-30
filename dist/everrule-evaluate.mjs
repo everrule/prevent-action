@@ -20,10 +20,6 @@ import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { isAbsolute, normalize, relative, resolve } from "node:path";
 var REPORT_FORMAT = { "node-test": "junit", pytest: "junit", vitest: "jest-json", jest: "jest-json" };
-function readReport(runner, text, testPath, cwd) {
-  const c = readCases(runner, text, testPath, cwd);
-  return c && summarizeCases(c);
-}
 function readCases(runner, text, testPath, cwd) {
   return REPORT_FORMAT[runner] === "junit" ? junitCases(runner, text, testPath) : jestJsonCases(text, testPath, cwd);
 }
@@ -4434,7 +4430,7 @@ var BacklogCheck = external_exports.object({
   problems: external_exports.array(external_exports.string()).max(20)
 }).strict();
 var EVALUATION_SCHEMA = "everrule-evaluation/v1";
-var EVALUATOR_VERSION = "1.0.0";
+var EVALUATOR_VERSION = "1.1.0";
 var EvaluationEvent = external_exports.object({
   name: external_exports.string().min(1),
   pull_request: external_exports.number().int().positive().nullable(),
@@ -4610,8 +4606,10 @@ async function execute(planned, changedFiles, exec, opts) {
       run2 = { exit_code: null, signal: null, timed_out: false, spawn_error: e instanceof Error ? e.message : String(e), duration_ms: 0 };
     }
     const text = opts.readFile(report);
-    const parsed = text === null ? null : readReport(c.test.runner, text, c.test.path, opts.cwd);
+    const cases = text === null ? null : readCases(c.test.runner, text, c.test.path, opts.cwd);
+    const parsed = cases && summarizeCases(cases);
     const classified = classifyRun(run2, parsed, text === null ? "missing" : parsed ? "read" : "unreadable", c.test.path);
+    if (classified.result === "BEHAVIOR_FAIL") opts.onFailure?.(c.id, (cases?.cases ?? []).filter((x) => x.status === "failed" && x.message).map((x) => x.message));
     const until = c.enforcement?.advisory_until;
     const inBurnIn = until !== void 0 && at.getTime() < Date.parse(until);
     applicable.push({ id: c.id, version: c.version, contract_hash: contractHash(c), approved_hash: c.approval.contract_hash, test_hash: c.test.sha256, hash_algorithm: c.hash_algorithm ?? "sha256", test: c.test.path, runner: c.test.runner, ...classified, exit_code: run2.exit_code, matched_paths: r.matched_paths, duration_ms: run2.duration_ms, ...inBurnIn ? { advisory_until: until } : {} });
@@ -4744,11 +4742,11 @@ function execIn(cwd) {
       clearTimeout(timer);
       finish({ exit_code: null, signal: null, timed_out: false, spawn_error: `${cmd} could not start: ${e.message}` });
     });
-    child.on("close", (code, signal) => {
+    child.on("close", (code2, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      finish({ exit_code: code, signal: signal ?? null, timed_out: timedOut });
+      finish({ exit_code: code2, signal: signal ?? null, timed_out: timedOut });
     });
   });
 }
@@ -5020,6 +5018,144 @@ function exitCodeForVerification(report) {
   return report.status === "error" ? 3 : 0;
 }
 
+// packages/prevention-contract/src/explain.ts
+var MAX_LINES = 20;
+function parseUnifiedDiff(text) {
+  const added = [];
+  const removed = [];
+  let path2 = "";
+  let oldLine = 0;
+  let newLine = 0;
+  let deletionOnly = false;
+  let hunkNewStart = 0;
+  for (const raw of text.split("\n")) {
+    if (raw.startsWith("diff --git ")) {
+      path2 = raw.replace(/^diff --git a\/.* b\//, "");
+      continue;
+    }
+    if (raw.startsWith("+++ ")) {
+      if (raw !== "+++ /dev/null") path2 = raw.slice(4).replace(/^b\//, "");
+      continue;
+    }
+    if (raw.startsWith("--- ")) continue;
+    const h = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(raw);
+    if (h) {
+      oldLine = Number(h[1]);
+      newLine = Number(h[3]);
+      hunkNewStart = newLine;
+      deletionOnly = h[4] === "0";
+      continue;
+    }
+    if (!path2 || raw.startsWith("\\")) continue;
+    if (raw.startsWith("+")) added.push({ path: path2, line: newLine++, text: raw.slice(1) });
+    else if (raw.startsWith("-")) removed.push({ path: path2, line: oldLine++, at: Math.max(1, deletionOnly ? hunkNewStart : newLine), text: raw.slice(1) });
+    else if (raw.startsWith(" ")) {
+      oldLine++;
+      newLine++;
+    }
+  }
+  return { added, removed };
+}
+var meaningful = (s) => /[A-Za-z0-9]/.test(s) && s.trim().length >= 4;
+var same = (a, b) => a.trim() === b.trim();
+function cleanMessage(m) {
+  return m.replace(/\u001b\[[0-9;]*m/g, "").split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() && !/^\s*at /.test(l)).slice(0, 3).map((l) => l.trim().slice(0, 200));
+}
+var code = (lines, sign) => ["```diff", ...lines.slice(0, MAX_LINES).map((l) => `${sign}${l}`), ...lines.length > MAX_LINES ? [` … ${lines.length - MAX_LINES} more`] : [], "```"];
+function explainRegression(i) {
+  const c = i.contract;
+  const incident = c.incident?.id;
+  const title = c.incident?.title;
+  const what = incident ? title ? title.startsWith(incident) ? title : `${incident}: ${title}` : incident : c.id;
+  const fixOf = incident ? `the fix for ${incident}` : "the fix";
+  const inScope = (path2) => matchesScope(c, [path2]).length > 0;
+  const level = i.result.advisory_until ? "warning" : "error";
+  const prefix = i.pathPrefix ?? "";
+  const lines = [];
+  lines.push(`### ${i.rehearsal ? "Rehearsal: this pull request brings back" : "This pull request brings back"} ${what}`, "");
+  if (i.rehearsal) lines.push("Labelled `everrule:rehearsal`: it shows the protection working and is not counted as a regression caught.", "");
+  if (i.result.advisory_until) lines.push(`This protection is in burn-in until ${i.result.advisory_until.slice(0, 10)}, so this is a warning, not a block.`, "");
+  const a = c.approval;
+  lines.push(`**The rule** (${c.id}${a.approver_name ? `, approved by ${a.approver_name}${a.approver_role ? `, ${a.approver_role}` : ""}` : ""}): ${c.requirement.statement}`, "");
+  lines.push(`**What the test saw:** ${i.result.failed_cases.length ? i.result.failed_cases.map((x) => `\`${x}\``).join(", ") : i.result.detail}`);
+  const msg = i.messages.flatMap(cleanMessage).slice(0, 6);
+  if (msg.length) lines.push("```", ...msg, "```");
+  lines.push("");
+  const annotations = [];
+  const fixAdded = (i.fix?.added ?? []).filter((l) => inScope(l.path));
+  const fixRemoved = (i.fix?.removed ?? []).filter((l) => inScope(l.path));
+  if (i.fix && i.change) {
+    const undone = i.change.removed.filter((r) => inScope(r.path) && meaningful(r.text) && fixAdded.some((f) => f.path === r.path && same(f.text, r.text)));
+    const back = i.change.added.filter((r) => inScope(r.path) && meaningful(r.text) && fixRemoved.some((f) => f.path === r.path && same(f.text, r.text)));
+    if (undone.length || back.length) {
+      const spots = /* @__PURE__ */ new Map();
+      const spot = (path2, line) => {
+        const k = `${path2}:${line}`;
+        if (!spots.has(k)) spots.set(k, { path: path2, line, removes: [], restores: [] });
+        return spots.get(k);
+      };
+      for (const r of undone) spot(r.path, r.at).removes.push(r.text);
+      for (const r of back) spot(r.path, r.line).restores.push(r.text);
+      const n = (k, what2) => k === 1 ? `a line ${fixOf} ${what2}` : `${k} lines ${fixOf} ${what2}`;
+      lines.push("**Where:**");
+      for (const sp of spots.values()) {
+        if (sp.removes.length) lines.push(`- \`${sp.path}\` line ${sp.line} removes ${n(sp.removes.length, "added")}:`, ...code(sp.removes, "-"));
+        if (sp.restores.length) lines.push(`- \`${sp.path}\` line ${sp.line} brings back ${n(sp.restores.length, "removed")}:`, ...code(sp.restores, "+"));
+        const said = [
+          ...sp.removes.length ? [`This change removes ${n(sp.removes.length, "added")}:`, ...sp.removes.map((t) => `  ${t.trim()}`)] : [],
+          ...sp.restores.length ? [`This change brings back ${n(sp.restores.length, "removed")}:`, ...sp.restores.map((t) => `  ${t.trim()}`)] : []
+        ];
+        annotations.push({ level, path: prefix + sp.path, line: sp.line, title: `EverRule: ${incident ?? c.id} would come back`, message: [...said, c.requirement.statement].join("\n") });
+      }
+      lines.push("");
+    } else {
+      const touched = [...new Set([...i.change.added, ...i.change.removed].map((l) => l.path).filter(inScope))];
+      lines.push(`**Where:** this pull request does not remove the fix's lines; it changes the behavior another way, in ${touched.length ? touched.map((p) => `\`${p}\``).join(", ") : "the rule's scope"}.`, "");
+    }
+  }
+  const v = c.verification;
+  if (v?.mode === "exact") {
+    const pr = c.incident?.fix_pr;
+    lines.push(`**How it was fixed before:** ${pr ? `[${fixOf}](${pr})` : fixOf}, from \`${v.broken_revision.slice(0, 7)}\` to \`${v.fixed_revision.slice(0, 7)}\`.`);
+    if (!i.fix) lines.push("Its lines are not shown: the fix's commits are not in this checkout. Check out with `fetch-depth: 0` to see them.");
+    else if (fixAdded.length || fixRemoved.length) {
+      lines.push("Its changes in this rule's scope:", ...code([...fixRemoved.map((l) => `-${l.text}`), ...fixAdded.map((l) => `+${l.text}`)], ""));
+    }
+    lines.push("");
+  } else if (v?.mode === "effect_boundary") {
+    lines.push(`**How it was proven:** at the effect boundary. ${v.limitation}`, "");
+  } else if (v?.mode === "asserted") {
+    lines.push(`**Basis:** team-written and not proven against a failure. ${v.basis}`, "");
+  }
+  lines.push(`**What to do:** restore the behavior the rule describes${v?.mode === "exact" ? " (the fix above shows how it was done)" : ""}. If the rule itself should change, amend the contract in a pull request and have ${a.approver_name ?? "its owner"} approve it again; the check does not pass on a loosened rule without that approval.`);
+  return { markdown: lines.join("\n"), annotations };
+}
+function explainFailures(record, contracts, messages, deps) {
+  const byId = new Map(contracts.map((c) => [c.id, c]));
+  const rehearsal = record.event?.pr_labels.includes("everrule:rehearsal") ?? false;
+  const change = deps.base ? parse(deps.diff(deps.base, "HEAD")) : null;
+  const parts = [];
+  const annotations = [];
+  for (const r of record.applicable.filter((x) => x.result === "BEHAVIOR_FAIL")) {
+    const c = byId.get(r.id);
+    if (!c) continue;
+    const fix = c.verification?.mode === "exact" ? parse(deps.diff(c.verification.broken_revision, c.verification.fixed_revision)) : null;
+    const e = explainRegression({ contract: c, result: r, messages: messages.get(r.id) ?? [], fix, change, rehearsal, ...deps.pathPrefix ? { pathPrefix: deps.pathPrefix } : {} });
+    parts.push(e.markdown);
+    annotations.push(...e.annotations);
+  }
+  return { markdown: parts.join("\n\n"), annotations };
+}
+var parse = (text) => text === null ? null : parseUnifiedDiff(text);
+function safeRef(ref) {
+  return /^[A-Za-z0-9][A-Za-z0-9._/~^-]{0,199}$/.test(ref) && !ref.includes("..");
+}
+function annotationCommand(a) {
+  const data = (s) => s.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+  const prop = (s) => data(s).replace(/:/g, "%3A").replace(/,/g, "%2C");
+  return `::${a.level} file=${prop(a.path)},line=${a.line},title=${prop(a.title)}::${data(a.message)}`;
+}
+
 // packages/prevention-contract/src/cli.ts
 function arg(name, fallback) {
   const i = process.argv.indexOf(`--${name}`);
@@ -5109,16 +5245,29 @@ approval.contract_hash ${h.contract_hash}`);
   }
   const reportDir = mkdtempSync(join3(tmpdir(), "everrule-reports-"));
   let record;
+  const failureMessages = /* @__PURE__ */ new Map();
   try {
-    record = await execute(plan(contracts, changedFiles, integrity), changedFiles, execIn(process.cwd()), { reportDir, cwd: process.cwd(), readFile: readIfPresent, timeoutMs: minutes * 6e4, event, backlog: checkBacklog(readIfPresent(join3(dirname2(contractsDir), "backlog.json"))) });
+    record = await execute(plan(contracts, changedFiles, integrity), changedFiles, execIn(process.cwd()), { reportDir, cwd: process.cwd(), readFile: readIfPresent, timeoutMs: minutes * 6e4, event, backlog: checkBacklog(readIfPresent(join3(dirname2(contractsDir), "backlog.json"))), onFailure: (id, m) => failureMessages.set(id, m) });
   } finally {
     rmSync2(reportDir, { recursive: true, force: true });
   }
   writeFileSync2(out, JSON.stringify(record, null, 2) + "\n");
-  const md = summarize(record, contracts);
+  let md = summarize(record, contracts);
+  const explained = explainFailures(record, contracts, failureMessages, { diff: gitDiff, ...base ? { base } : {}, pathPrefix: gitPrefix() });
+  if (explained.markdown) md += "\n\n" + explained.markdown;
   console.log(md);
+  for (const a of explained.annotations) console.log(annotationCommand(a));
   if (process.env["GITHUB_STEP_SUMMARY"]) appendFileSync(process.env["GITHUB_STEP_SUMMARY"], md + "\n");
   process.exit(exitCodeFor(record));
+}
+function gitDiff(from, to) {
+  if (!safeRef(from) || !safeRef(to)) return null;
+  const r = spawnSync3("git", ["diff", "-U0", "--no-color", "--no-ext-diff", "--relative", from, to, "--"], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
+  return r.status === 0 ? r.stdout : null;
+}
+function gitPrefix() {
+  const r = spawnSync3("git", ["rev-parse", "--show-prefix"], { encoding: "utf8" });
+  return r.status === 0 ? r.stdout.trim() : "";
 }
 function run() {
   main().catch((e) => {
