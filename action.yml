@@ -50,7 +50,7 @@ runs:
         node "$GITHUB_ACTION_PATH/dist/everrule-evaluate.mjs" verify --contracts "$CONTRACTS_DIR" ${INSTALL_COMMAND:+--install "$INSTALL_COMMAND"} --out "$RUNNER_TEMP/everrule-verification.json"
     - name: Upload verification record
       if: always() && inputs.mode == 'verify'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: everrule-verification
         path: ${{ runner.temp }}/everrule-verification.json
@@ -84,7 +84,7 @@ runs:
         echo "status=$status" >> "$GITHUB_OUTPUT"
         exit $code
     - name: Upload evaluation record
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       if: always() && inputs.mode == 'evaluate'
       with:
         name: everrule-evaluation

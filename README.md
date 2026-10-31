@@ -9,7 +9,7 @@ The Action runs entirely in your CI. It reads files in your repository, runs you
 Copy `workflow-template.yml` to `.github/workflows/everrule.yml`, add the two lines in `CODEOWNERS.example` to your `CODEOWNERS` with your owners, and require the `everrule` check on your default branch. The workflow has no `paths` filter on purpose: a required check must report on every pull request; which contracts apply is decided inside the evaluator.
 
 ```yaml
-- uses: actions/checkout@v4
+- uses: actions/checkout@v7
   with: { fetch-depth: 0 }
 - uses: everrule/prevent-action@v1
   with: { mode: evaluate }
