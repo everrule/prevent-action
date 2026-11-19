@@ -5,7 +5,7 @@
   "description": "A prevention contract under .everrule/contracts. Structure only: the evaluator also checks that timestamps are real calendar dates, that enforcement.advisory_until is at most 14 days after approval.approved_at and not before it, that a contract does not supersede itself, and that the behavior block matches its Behavioral Profile.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "failure_class", "requirement", "scope", "test", "approval"],
+  "required": ["id", "requirement", "scope", "test", "approval"],
   "properties": {
     "$schema": { "type": "string", "description": "Editor metadata; not part of the contract hash." },
     "schema": { "const": "everrule-contract/v1", "description": "Absent reads as everrule-contract/v1." },
@@ -144,7 +144,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["mode", "basis", "verified_at"],
+          "required": ["mode", "basis"],
           "properties": {
             "mode": { "const": "asserted" },
             "basis": { "type": "string", "minLength": 1 },
@@ -189,10 +189,10 @@
   },
   "allOf": [
     {
-      "description": "An incident contract (origin absent or incident) names its incident.",
+      "description": "An incident contract (origin absent or incident) names its incident and its failure class; a team-written one may leave failure_class out, read as other.",
       "if": { "required": ["origin"], "properties": { "origin": { "const": "team" } } },
       "then": true,
-      "else": { "required": ["incident"] }
+      "else": { "required": ["incident", "failure_class"] }
     },
     {
       "description": "asserted verification is only for team-written contracts.",

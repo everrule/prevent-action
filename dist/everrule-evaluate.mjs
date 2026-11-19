@@ -4233,7 +4233,7 @@ var Verification = external_exports.discriminatedUnion("mode", [
   external_exports.object({
     mode: external_exports.literal("asserted"),
     basis: external_exports.string().min(1),
-    verified_at: external_exports.string()
+    verified_at: external_exports.string().optional()
   }).strict()
 ]);
 var LoopholeResult = external_exports.object({
@@ -4287,7 +4287,11 @@ var BehaviorBlock = external_exports.object({
   }).strict(),
   execution: external_exports.object({ ordering: Ident, completion: Ident, isolation: Ident, effects_visibility: Ident, side_effect_environment: Ident }).strict()
 }).strict();
-var PreventionContract = external_exports.object({
+var teamDefaults = (raw) => {
+  const r = raw;
+  return r && typeof r === "object" && r.origin === "team" && r.failure_class === void 0 ? { ...r, failure_class: "other" } : raw;
+};
+var PreventionContract = external_exports.preprocess(teamDefaults, external_exports.object({
   /** Editor metadata (a JSON Schema URL); not part of the rule, so not in the contract hash. */
   $schema: external_exports.string().optional(),
   schema: external_exports.literal(CONTRACT_SCHEMA, { errorMap: () => ({ message: `unknown contract schema; this evaluator reads ${CONTRACT_SCHEMA}` }) }).optional(),
@@ -4351,7 +4355,7 @@ var PreventionContract = external_exports.object({
   }
   if (!c.test.sha256) ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["test", "sha256"], message: "required when status is approved" });
   if (!c.verification) ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["verification"], message: "required when status is approved" });
-});
+}));
 function originOf(c) {
   return c.origin ?? "incident";
 }
@@ -5199,6 +5203,15 @@ function hashFor(contractFile) {
   if (source === null) throw new Error(`test file not found: ${raw?.test?.path} (run from the repository root)`);
   return approvalHashes(raw, source);
 }
+function approve(contractFile, name, role) {
+  const h = hashFor(contractFile);
+  const raw = JSON.parse(readFileSync3(contractFile, "utf8"));
+  raw.test.sha256 = h.test_sha256;
+  raw.approval = { status: "approved", approver_name: name, approver_role: role, approved_at: (/* @__PURE__ */ new Date()).toISOString(), contract_hash: h.contract_hash };
+  const parsed = PreventionContract.safeParse(raw);
+  if (!parsed.success) throw new ContractError(`${contractFile}: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+  writeFileSync2(contractFile, JSON.stringify(raw, null, 2) + "\n");
+}
 async function main() {
   if (process.argv[2] === "hash") {
     const file = process.argv[3];
@@ -5206,6 +5219,13 @@ async function main() {
     const h = hashFor(file);
     console.log(`test.sha256            ${h.test_sha256}
 approval.contract_hash ${h.contract_hash}`);
+    return;
+  }
+  if (process.argv[2] === "approve") {
+    const file = process.argv[3];
+    if (!file || file.startsWith("--")) throw new Error('usage: everrule-evaluate approve <contract.json> --name "<approver>" --role "<role>"');
+    approve(file, arg("name"), arg("role"));
+    console.log(`approved ${file}`);
     return;
   }
   if (process.argv[2] === "verify") {
