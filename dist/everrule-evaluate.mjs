@@ -9,9 +9,9 @@ var __export = (target, all) => {
 
 // packages/prevention-contract/src/cli.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { readdirSync, readFileSync as readFileSync3, writeFileSync as writeFileSync2, appendFileSync, existsSync as existsSync4, mkdtempSync, rmSync as rmSync2 } from "node:fs";
+import { readdirSync as readdirSync2, readFileSync as readFileSync4, writeFileSync as writeFileSync3, appendFileSync, existsSync as existsSync5, mkdtempSync, rmSync as rmSync2 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname as dirname2, join as join3 } from "node:path";
+import { dirname as dirname3, join as join4 } from "node:path";
 
 // packages/prevention-contract/src/evaluate.ts
 import { createHash } from "node:crypto";
@@ -4673,6 +4673,8 @@ function summarize(record, contracts) {
     else if (v?.mode === "asserted") lines.push(`  - not proven against a failure; the team's basis: ${v.basis}`);
     if (a.result !== "PASS") lines.push(`  - ${a.detail}${a.failed_cases.length ? ` Failed: ${a.failed_cases.join("; ")}.` : ""}`);
   }
+  const unverified = notVerified(record, byId);
+  if (unverified.length) lines.push("", "Not verified by this check:", ...unverified.map((u) => `- ${u}`));
   if (record.not_applicable.length) lines.push("", `Not applicable to this change: ${record.not_applicable.join(", ")}.`);
   if (record.integrity.length) {
     lines.push("", "Changed without approval:");
@@ -4682,6 +4684,20 @@ function summarize(record, contracts) {
   if (record.backlog.status === "invalid") lines.push("", `Warning: .everrule/backlog.json is invalid, so coverage cannot be read from it (this does not fail the check): ${record.backlog.problems.join("; ")}.`);
   lines.push("", "EverRule's service was not required to produce this result; the contracts and tests live in this repository.");
   return lines.join("\n");
+}
+function notVerified(record, byId) {
+  const out = [];
+  for (const a of record.applicable) {
+    const c = byId.get(a.id);
+    if (a.result === "INFRA_ERROR") out.push(`**${a.id}**: its test could not run, so this change was not checked against it.`);
+    const v = c?.verification;
+    if (v?.mode === "asserted") out.push(`**${a.id}**: team-written, not proven against a failure.`);
+    if (v?.mode === "effect_boundary") out.push(`**${a.id}**: proven at the service boundary, not on the original commits. ${v.limitation}`);
+    for (const l of c?.loopholes ?? []) {
+      if (l.result !== "holds") out.push(`**${a.id}**: ${l.title} is not covered by the test${l.result === "owner_decides" ? "; left to the owner at approval" : ""}.`);
+    }
+  }
+  return out;
 }
 function testFileHash(contents) {
   return createHash("sha256").update(contents.replace(/\r\n/g, "\n")).digest("hex");
@@ -4755,15 +4771,98 @@ function execIn(cwd) {
   });
 }
 
+// packages/prevention-contract/src/init.ts
+import { existsSync as existsSync2, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname as dirname2, join as join2 } from "node:path";
+var WORKFLOW = `# Copy to .github/workflows/everrule.yml. EverRule's first pull request to a
+# repository adds this file; the customer then requires the \`everrule\` check on
+# the default branch's ruleset, with code-owner review.
+name: everrule
+on:
+  pull_request:                  # no paths filter: a required check must always report
+  merge_group:                   # repositories with a merge queue
+  push:
+    branches: ["everrule/**"]    # verification of a draft before its pull request opens
+jobs:
+  everrule:                      # stable name; this is the check the customer requires
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - uses: everrule/prevent-action@v1
+        with: { mode: evaluate }
+  everrule-verify:               # never required; proves a draft before approval
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - uses: everrule/prevent-action@v1
+        with: { mode: verify }
+`;
+var FIRST_TEST = {
+  vitest: ".everrule/tests/first-rule.test.js",
+  jest: ".everrule/tests/first-rule.test.js",
+  "node-test": ".everrule/tests/first-rule.test.ts",
+  pytest: ".everrule/tests/test_first_rule.py"
+};
+function init(owner, runner, cwd) {
+  if (!/^@\S+$/.test(owner)) throw new Error('--owner must be a GitHub user or team, for example "@your-org/payments-platform"');
+  const done = [];
+  const write = (path2, content) => {
+    const full = join2(cwd, path2);
+    if (existsSync2(full)) {
+      done.push(`kept   ${path2} (already there)`);
+      return;
+    }
+    mkdirSync(dirname2(full), { recursive: true });
+    writeFileSync(full, content);
+    done.push(`wrote  ${path2}`);
+  };
+  write(".github/workflows/everrule.yml", WORKFLOW);
+  const owners = join2(cwd, ".github", "CODEOWNERS");
+  const have = existsSync2(owners) ? readFileSync(owners, "utf8") : "";
+  const lines = [["/.everrule/", `/.everrule/                      ${owner}`], ["/.github/workflows/everrule.yml", `/.github/workflows/everrule.yml  ${owner}`]];
+  const missing = lines.filter(([path2]) => !have.split("\n").some((l) => l.trim().startsWith(path2))).map(([, line]) => line);
+  if (missing.length) {
+    mkdirSync(dirname2(owners), { recursive: true });
+    writeFileSync(owners, `${have}${have && !have.endsWith("\n") ? "\n" : ""}${missing.join("\n")}
+`);
+    done.push(`${have ? "added " : "wrote "} .github/CODEOWNERS (${missing.length} ${missing.length === 1 ? "line" : "lines"} for ${owner})`);
+  } else done.push("kept   .github/CODEOWNERS (already covers .everrule/ and the workflow)");
+  const contracts = join2(cwd, ".everrule", "contracts");
+  if (existsSync2(contracts) && readdirSync(contracts).some((f) => f.endsWith(".json"))) done.push("kept   .everrule/contracts (rules already there)");
+  else {
+    write(".everrule/contracts/ER-TEAM-001.json", JSON.stringify({
+      id: "ER-TEAM-001",
+      origin: "team",
+      requirement: { statement: "Describe what must stay true." },
+      scope: { paths: ["src/**"] },
+      test: { path: FIRST_TEST[runner], runner, required: true },
+      verification: { mode: "asserted", basis: "Say why the team believes this rule." },
+      approval: { status: "draft" }
+    }, null, 2) + "\n");
+  }
+  return [
+    ...done,
+    "",
+    "Next:",
+    `1. Write the rule's sentence and scope in .everrule/contracts/ER-TEAM-001.json, and its test at ${FIRST_TEST[runner]}.`,
+    '2. Have the owner approve it: everrule-evaluate approve .everrule/contracts/ER-TEAM-001.json --name "<name>" --role "<role>"',
+    "3. Open a pull request, then require the everrule check and code-owner review on the default branch."
+  ];
+}
+
 // packages/prevention-contract/src/verify/drafts.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync3, readFileSync as readFileSync2 } from "node:fs";
-import { join as join2 } from "node:path";
+import { existsSync as existsSync4, readFileSync as readFileSync3 } from "node:fs";
+import { join as join3 } from "node:path";
 
 // packages/prevention-contract/src/verify/protocol.ts
 import { spawnSync } from "node:child_process";
 import { createHash as createHash2, randomUUID } from "node:crypto";
-import { existsSync as existsSync2, lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync as existsSync3, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, rmSync, symlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
 import path from "node:path";
 var VERIFICATION_PROTOCOL = "historical-sequential-v2";
 var FIXED_RUNS = 3;
@@ -4805,11 +4904,11 @@ function revisionEvidence(input, name, revision, runs) {
   const { dir, cwd, target, notes } = prepare(input, name, revision);
   try {
     const bin = runnerBin(input, dir, cwd);
-    const lock = [.../* @__PURE__ */ new Set([cwd, dir])].flatMap((d) => LOCKFILES.map((f) => path.join(d, f))).find(existsSync2);
-    const environment = { node: process.version, runner: runnerVersion(input.runner, bin, cwd), lockfile: lock ? digestOf(readFileSync(lock)) : "none", dependencies: input.install ? `install: ${input.install}` : input.deps };
+    const lock = [.../* @__PURE__ */ new Set([cwd, dir])].flatMap((d) => LOCKFILES.map((f) => path.join(d, f))).find(existsSync3);
+    const environment = { node: process.version, runner: runnerVersion(input.runner, bin, cwd), lockfile: lock ? digestOf(readFileSync2(lock)) : "none", dependencies: input.install ? `install: ${input.install}` : input.deps };
     const results = [];
     for (let i = 0; i < runs; i++) results.push(runOnce(input, cwd, bin));
-    const placed = digestOf(readFileSync(target));
+    const placed = digestOf(readFileSync2(target));
     return { revision, environment, environment_digest: digestOf(JSON.stringify(environment)), candidate_artifact_digest: placed, notes, runs: results };
   } finally {
     spawnSync("git", ["worktree", "remove", "--force", dir], { cwd: input.repo });
@@ -4830,21 +4929,21 @@ function prepare(input, name, revision) {
   for (const part of path.posix.dirname(rel).split("/")) {
     if (part === ".") continue;
     p = path.join(p, part);
-    if (existsSync2(p) && lstatSync(p).isSymbolicLink()) throw new ProtocolError(`${p} is a symbolic link`);
+    if (existsSync3(p) && lstatSync(p).isSymbolicLink()) throw new ProtocolError(`${p} is a symbolic link`);
   }
-  if (existsSync2(target) && lstatSync(target).isSymbolicLink()) throw new ProtocolError(`${manifest.artifact.path} is a symbolic link at ${revision}`);
+  if (existsSync3(target) && lstatSync(target).isSymbolicLink()) throw new ProtocolError(`${manifest.artifact.path} is a symbolic link at ${revision}`);
   if (manifest.artifact.adopted_test) {
-    const present = existsSync2(target) ? digestOf(readFileSync(target)) : null;
+    const present = existsSync3(target) ? digestOf(readFileSync2(target)) : null;
     if (name === "fixed" && present !== manifest.artifact.digest) throw new ProtocolError(`${manifest.artifact.path} at ${revision} is not the adopted test's exact bytes`);
     if (name === "broken" && present !== manifest.artifact.digest) {
-      mkdirSync(path.dirname(target), { recursive: true });
-      writeFileSync(target, input.candidate);
+      mkdirSync2(path.dirname(target), { recursive: true });
+      writeFileSync2(target, input.candidate);
       notes.push(present ? "the adopted test's own earlier version was replaced by the exact candidate in the temporary worktree" : "the adopted test did not exist at this commit; the exact candidate was placed in the temporary worktree");
     }
   } else {
-    if (existsSync2(target)) throw new ProtocolError(`${manifest.artifact.path} already exists at ${revision}; a candidate never replaces a file`);
-    mkdirSync(path.dirname(target), { recursive: true });
-    writeFileSync(target, input.candidate);
+    if (existsSync3(target)) throw new ProtocolError(`${manifest.artifact.path} already exists at ${revision}; a candidate never replaces a file`);
+    mkdirSync2(path.dirname(target), { recursive: true });
+    writeFileSync2(target, input.candidate);
   }
   if (input.install) {
     const r = spawnSync(input.install, { cwd: dir, shell: true, encoding: "utf8", timeout: input.timeoutMs * 5, env: childEnv() });
@@ -4854,8 +4953,8 @@ function prepare(input, name, revision) {
     for (const sub of /* @__PURE__ */ new Set(["", prefix])) {
       const from = path.join(repo, sub, "node_modules");
       const to = path.join(dir, sub, "node_modules");
-      if (existsSync2(from) && !existsSync2(to)) {
-        mkdirSync(path.dirname(to), { recursive: true });
+      if (existsSync3(from) && !existsSync3(to)) {
+        mkdirSync2(path.dirname(to), { recursive: true });
         symlinkSync(from, to, "dir");
         linked = true;
       }
@@ -4869,11 +4968,11 @@ function runnerBin(input, dir, cwd) {
   if (!bin) return cmd;
   if (input.runnerBin) {
     const explicit = path.resolve(input.runnerBin);
-    if (!existsSync2(explicit)) throw new ProtocolError(`no installed runner at ${explicit}`);
+    if (!existsSync3(explicit)) throw new ProtocolError(`no installed runner at ${explicit}`);
     return explicit;
   }
   const file = process.platform === "win32" ? `${cmd}.cmd` : cmd;
-  const found = [cwd, dir].map((d) => path.join(d, "node_modules", ".bin", file)).find(existsSync2);
+  const found = [cwd, dir].map((d) => path.join(d, "node_modules", ".bin", file)).find(existsSync3);
   if (!found) throw new ProtocolError(`no installed ${cmd} in the worktree's node_modules/.bin; install dependencies per your policy, link them, or pass --runner`);
   return found;
 }
@@ -4891,7 +4990,7 @@ function runOnce(input, cwd, bin) {
   const select = adopted ? ["-t", `^${escapeRe(adopted)}$`] : [];
   const r = spawnSync(bin, [...args, ...select], { cwd, encoding: "utf8", timeout: input.timeoutMs, env: childEnv() });
   if (r.error?.code === "ETIMEDOUT" || r.signal) return { result: "INFRA_TIMEOUT", discovered: 0, executed: 0 };
-  const text = existsSync2(report) ? readFileSync(report, "utf8") : null;
+  const text = existsSync3(report) ? readFileSync2(report, "utf8") : null;
   rmSync(report, { force: true });
   const tail = ((r.stderr || "") + (r.error ? `
 ${r.error.message}` : "")).trim().split("\n").slice(-5).join("\n");
@@ -4955,10 +5054,10 @@ function git2(cwd, args) {
   return r.stdout.trim();
 }
 function sessionFor(c, cwd, broken, fixed, candidate) {
-  const dir = join2(cwd, ".everrule", "verify", c.id);
-  if (existsSync3(join2(dir, "session.json")) || existsSync3(join2(dir, "manifest.json"))) {
-    const session = JSON.parse(readFileSync2(join2(dir, "session.json"), "utf8"));
-    const manifest = JSON.parse(readFileSync2(join2(dir, "manifest.json"), "utf8"));
+  const dir = join3(cwd, ".everrule", "verify", c.id);
+  if (existsSync4(join3(dir, "session.json")) || existsSync4(join3(dir, "manifest.json"))) {
+    const session = JSON.parse(readFileSync3(join3(dir, "session.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync3(join3(dir, "manifest.json"), "utf8"));
     if (session.broken_sha !== broken || session.fixed_sha !== fixed) throw new ProtocolError(`the session's revisions (${session.broken_sha?.slice(0, 12)}, ${session.fixed_sha?.slice(0, 12)}) are not the draft's verification_target`);
     if (manifest.artifact?.path !== c.test.path) throw new ProtocolError(`the manifest's candidate is ${manifest.artifact?.path}, not the draft's test ${c.test.path}`);
     return { session, manifest, source: "package" };
@@ -4992,9 +5091,9 @@ function verifyDrafts(opts) {
     const target = c.verification_target;
     if (!target) continue;
     try {
-      const testFile = join2(opts.cwd, c.test.path);
-      if (!existsSync3(testFile)) throw new ProtocolError(`test file not found: ${c.test.path}`);
-      const candidate = readFileSync2(testFile);
+      const testFile = join3(opts.cwd, c.test.path);
+      if (!existsSync4(testFile)) throw new ProtocolError(`test file not found: ${c.test.path}`);
+      const candidate = readFileSync3(testFile);
       if (c.test.sha256 && digestOf(candidate) !== `sha256:${c.test.sha256}`) throw new ProtocolError(`${c.test.path} does not match the draft's test.sha256`);
       const broken = git2(root, ["rev-parse", "--verify", `${target.base}^{commit}`]);
       const fixed = git2(root, ["rev-parse", "--verify", `${target.merge}^{commit}`]);
@@ -5168,9 +5267,9 @@ function arg(name, fallback) {
   throw new Error(`missing --${name}`);
 }
 function loadContracts(dir) {
-  if (!existsSync4(dir)) return [];
-  return readdirSync(dir).filter((f) => f.endsWith(".json")).sort().map((f) => {
-    const parsed = PreventionContract.safeParse(JSON.parse(readFileSync3(join3(dir, f), "utf8")));
+  if (!existsSync5(dir)) return [];
+  return readdirSync2(dir).filter((f) => f.endsWith(".json")).sort().map((f) => {
+    const parsed = PreventionContract.safeParse(JSON.parse(readFileSync4(join4(dir, f), "utf8")));
     if (!parsed.success) throw new ContractError(`${f}: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
     return parsed.data;
   });
@@ -5179,12 +5278,12 @@ var ContractError = class extends Error {
 };
 var readIfPresent = (path2) => {
   try {
-    return readFileSync3(path2, "utf8");
+    return readFileSync4(path2, "utf8");
   } catch {
     return null;
   }
 };
-var readTest = (path2) => existsSync4(path2) ? readFileSync3(path2, "utf8") : null;
+var readTest = (path2) => existsSync5(path2) ? readFileSync4(path2, "utf8") : null;
 function readBaseContracts(base, dir) {
   const git3 = (args) => {
     const r = spawnSync3("git", args, { encoding: "utf8" });
@@ -5198,19 +5297,19 @@ function readBaseContracts(base, dir) {
   });
 }
 function hashFor(contractFile) {
-  const raw = JSON.parse(readFileSync3(contractFile, "utf8"));
+  const raw = JSON.parse(readFileSync4(contractFile, "utf8"));
   const source = readTest(raw?.test?.path ?? "");
   if (source === null) throw new Error(`test file not found: ${raw?.test?.path} (run from the repository root)`);
   return approvalHashes(raw, source);
 }
 function approve(contractFile, name, role) {
   const h = hashFor(contractFile);
-  const raw = JSON.parse(readFileSync3(contractFile, "utf8"));
+  const raw = JSON.parse(readFileSync4(contractFile, "utf8"));
   raw.test.sha256 = h.test_sha256;
   raw.approval = { status: "approved", approver_name: name, approver_role: role, approved_at: (/* @__PURE__ */ new Date()).toISOString(), contract_hash: h.contract_hash };
   const parsed = PreventionContract.safeParse(raw);
   if (!parsed.success) throw new ContractError(`${contractFile}: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
-  writeFileSync2(contractFile, JSON.stringify(raw, null, 2) + "\n");
+  writeFileSync3(contractFile, JSON.stringify(raw, null, 2) + "\n");
 }
 async function main() {
   if (process.argv[2] === "hash") {
@@ -5228,12 +5327,16 @@ approval.contract_hash ${h.contract_hash}`);
     console.log(`approved ${file}`);
     return;
   }
+  if (process.argv[2] === "init") {
+    console.log(init(arg("owner"), Runner.parse(arg("runner", "vitest")), process.cwd()).join("\n"));
+    return;
+  }
   if (process.argv[2] === "verify") {
     const install = process.argv.includes("--install") ? arg("install") : "";
     const minutes2 = process.argv.includes("--timeout") ? Number(arg("timeout")) : 2;
     if (!(minutes2 > 0)) throw new Error("--timeout must be a number of minutes above 0");
     const report = verifyDrafts({ contracts: loadContracts(arg("contracts", ".everrule/contracts")), cwd: process.cwd(), ...install ? { install } : {}, timeoutMs: minutes2 * 6e4 });
-    writeFileSync2(arg("out", "verification.json"), JSON.stringify(report, null, 2) + "\n");
+    writeFileSync3(arg("out", "verification.json"), JSON.stringify(report, null, 2) + "\n");
     const md2 = summarizeVerification(report);
     console.log(md2);
     if (process.env["GITHUB_STEP_SUMMARY"]) appendFileSync(process.env["GITHUB_STEP_SUMMARY"], md2 + "\n");
@@ -5243,7 +5346,7 @@ approval.contract_hash ${h.contract_hash}`);
   const changedFile = arg("changed-files");
   const out = arg("out", ".everrule/last-evaluation.json");
   const base = process.argv.includes("--base") ? arg("base") : void 0;
-  const changedFiles = readFileSync3(changedFile, "utf8").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const changedFiles = readFileSync4(changedFile, "utf8").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   const contracts = loadContracts(contractsDir);
   let baseContracts = null;
   let baseError;
@@ -5261,17 +5364,17 @@ approval.contract_hash ${h.contract_hash}`);
   if (process.argv.includes("--event")) {
     const name = process.env["GITHUB_EVENT_NAME"];
     if (!name) throw new Error("--event needs GITHUB_EVENT_NAME, which GitHub Actions sets");
-    event = eventFrom(name, JSON.parse(readFileSync3(arg("event"), "utf8")));
+    event = eventFrom(name, JSON.parse(readFileSync4(arg("event"), "utf8")));
   }
-  const reportDir = mkdtempSync(join3(tmpdir(), "everrule-reports-"));
+  const reportDir = mkdtempSync(join4(tmpdir(), "everrule-reports-"));
   let record;
   const failureMessages = /* @__PURE__ */ new Map();
   try {
-    record = await execute(plan(contracts, changedFiles, integrity), changedFiles, execIn(process.cwd()), { reportDir, cwd: process.cwd(), readFile: readIfPresent, timeoutMs: minutes * 6e4, event, backlog: checkBacklog(readIfPresent(join3(dirname2(contractsDir), "backlog.json"))), onFailure: (id, m) => failureMessages.set(id, m) });
+    record = await execute(plan(contracts, changedFiles, integrity), changedFiles, execIn(process.cwd()), { reportDir, cwd: process.cwd(), readFile: readIfPresent, timeoutMs: minutes * 6e4, event, backlog: checkBacklog(readIfPresent(join4(dirname3(contractsDir), "backlog.json"))), onFailure: (id, m) => failureMessages.set(id, m) });
   } finally {
     rmSync2(reportDir, { recursive: true, force: true });
   }
-  writeFileSync2(out, JSON.stringify(record, null, 2) + "\n");
+  writeFileSync3(out, JSON.stringify(record, null, 2) + "\n");
   let md = summarize(record, contracts);
   const explained = explainFailures(record, contracts, failureMessages, { diff: gitDiff, ...base ? { base } : {}, pathPrefix: gitPrefix() });
   if (explained.markdown) md += "\n\n" + explained.markdown;

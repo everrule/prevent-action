@@ -8,6 +8,18 @@ In the files, a rule is called a contract and lives in `.everrule/contracts`.
 
 ## Install
 
+One command writes the workflow, the two code-owner lines and a first draft rule, and never overwrites a file that is already there:
+
+```bash
+git clone --depth 1 --branch v1 https://github.com/everrule/prevent-action /tmp/prevent-action
+```
+
+```bash
+node /tmp/prevent-action/dist/everrule-evaluate.mjs init --owner @your-org/payments-platform --runner vitest
+```
+
+Then require the `everrule` check on your default branch. By hand, the same three steps:
+
 1. Copy `workflow-template.yml` to `.github/workflows/everrule.yml`.
 2. Add the two lines in `CODEOWNERS.example` to your `CODEOWNERS`, with your owners.
 3. Require the `everrule` check on your default branch.
@@ -91,6 +103,8 @@ A team-written rule is enforced like any other, but the check says plainly that 
 | 1 | `behavior_fail` | Blocked: a rule's test ran and an assertion failed, as shown by the runner's own report. |
 | 2 | `integrity_fail` | Blocked: a rule or its test changed after approval, an approved rule was deleted without being retired, or a rule's file is invalid. |
 | 3 | `infra_error` | The test could not run or report (`RUNNER_CRASH`, `DEPENDENCY_OR_SETUP`, `TIMEOUT`, `NO_REPORT`). When unsure, 3, never 1. |
+
+A passing check lists what it did not verify for the rules a change touched: a test that could not run, a rule not proven against a failure, a proof made only at the service boundary, and any case the test is known not to cover.
 
 The fingerprints show that a rule changed after approval; they do not stop it, because the same pull request could write new ones. Code-owner review of `.everrule/` is what stops a rule being loosened.
 
