@@ -24,3 +24,6 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: everrule/prevent-action@v1
         with: { mode: verify }
+      # For a draft with no fix yet: where the failure first appears in history. Does nothing otherwise.
+      - uses: everrule/prevent-action@v1
+        with: { mode: diagnose }

@@ -37,12 +37,14 @@ Every setting has a working default:
 
 | Input | Default | Meaning |
 |---|---|---|
-| `mode` | `evaluate` | `evaluate` is the required check. `verify` proves a draft rule before approval: three passes at its fix, a failing assertion at the broken commit. |
+| `mode` | `evaluate` | `evaluate` is the required check. `verify` proves a draft rule before approval: three passes at its fix, a failing assertion at the broken commit. A draft that names only the broken commit is run there once and reported as reproduced or not; that is not a verification. `diagnose` then searches the history behind that commit for the earliest one where the test fails. |
 | `working-directory` | `.` | Where the rules' paths are relative to: the root, or a service folder in a monorepo. |
 | `contracts-dir` | `.everrule/contracts` | Relative to `working-directory`. |
 | `base-ref` | the pull request's or merge queue's base | Commit to compare against and to read approved rules from. |
 | `timeout-minutes` | `10` | Per rule; a test still running is stopped (exit 3, `TIMEOUT`). |
-| `install-command` | empty | `verify` only: installs dependencies in each historical worktree. Empty links the current `node_modules`. |
+| `install-command` | empty | `verify` and `diagnose`: installs dependencies in each historical worktree. Empty links the current `node_modules`. |
+| `depth` | `50` | `diagnose` only: how many first-parent commits behind the failing one to search. |
+| `max-runs` | `12` | `diagnose` only: the most test runs to spend on one draft. |
 
 ## Your first rule in ten minutes
 
@@ -108,7 +110,9 @@ A passing check lists what it did not verify for the rules a change touched: a t
 
 The fingerprints show that a rule changed after approval; they do not stop it, because the same pull request could write new ones. Code-owner review of `.everrule/` is what stops a rule being loosened.
 
-Every run uploads its record (`everrule-evaluation`, schema in `schema/everrule-evaluation.v1.json`). Rules follow `schema/everrule-contract.v1.json`; `.everrule/backlog.json` follows `schema/everrule-backlog.v1.json`.
+`verify` reports four results separately: behavior, incident resolution, regression safety and integrity. It never runs your other tests, so regression safety is always "not run by this tool": your own CI's checks on the fix cover it. `diagnose` reports the most likely introducing change with every run it made and its limits; a commit that cannot run is listed as unknown, and the result is never a certain cause.
+
+Every run uploads its record (`everrule-evaluation`, schema in `schema/everrule-evaluation.v1.json`; `verify` and `diagnose` upload `everrule-verification` and `everrule-diagnosis`). Rules follow `schema/everrule-contract.v1.json`; `.everrule/backlog.json` follows `schema/everrule-backlog.v1.json`.
 
 ## License
 

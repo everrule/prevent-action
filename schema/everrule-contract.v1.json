@@ -107,7 +107,7 @@
     "verification_target": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["base", "merge"],
+      "required": ["base"],
       "properties": { "base": { "$ref": "#/$defs/gitSha" }, "merge": { "$ref": "#/$defs/gitSha" } }
     },
     "verification": {
@@ -127,7 +127,30 @@
             "binding_set_digest": { "type": "string" },
             "intent_digest": { "type": "string" },
             "candidate_digest": { "type": "string" },
-            "verification_protocol_version": { "type": "string" }
+            "verification_protocol_version": { "type": "string" },
+            "dimensions": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["behavior", "incident_resolution", "regression_safety", "integrity"],
+              "properties": {
+                "behavior": { "$ref": "#/$defs/dimension" },
+                "incident_resolution": { "$ref": "#/$defs/dimension" },
+                "regression_safety": { "$ref": "#/$defs/dimension" },
+                "integrity": { "$ref": "#/$defs/dimension" }
+              }
+            }
+          }
+        },
+        {
+          "description": "The failure is shown at the broken revision and the resolution was made outside the repository, so no fix is verified.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "broken_revision", "broken_result", "reproduced_at"],
+          "properties": {
+            "mode": { "const": "reproduced" },
+            "broken_revision": { "type": "string", "minLength": 7 },
+            "broken_result": { "const": "fail" },
+            "reproduced_at": { "type": "string" }
           }
         },
         {
@@ -150,6 +173,23 @@
             "basis": { "type": "string", "minLength": 1 },
             "verified_at": { "type": "string" }
           }
+        }
+      ]
+    },
+    "resolution": {
+      "description": "How the incident was resolved. A resolution outside the repository has no revision.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "repository" }, "revision": { "$ref": "#/$defs/gitSha" }, "note": { "type": "string", "minLength": 1 } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "outside_repository" }, "note": { "type": "string", "minLength": 1 } }
         }
       ]
     },
@@ -200,6 +240,16 @@
       "then": { "required": ["origin"], "properties": { "origin": { "const": "team" } } }
     },
     {
+      "description": "reproduced verification is only for a resolution made outside the repository.",
+      "if": { "required": ["verification"], "properties": { "verification": { "required": ["mode"], "properties": { "mode": { "const": "reproduced" } } } } },
+      "then": { "required": ["resolution"], "properties": { "resolution": { "properties": { "kind": { "const": "outside_repository" } } } } }
+    },
+    {
+      "description": "A resolution outside the repository cannot be verified.",
+      "if": { "required": ["resolution"], "properties": { "resolution": { "required": ["kind"], "properties": { "kind": { "const": "outside_repository" } } } } },
+      "then": { "properties": { "verification": { "properties": { "mode": { "const": "reproduced" } } } } }
+    },
+    {
       "description": "An approved contract names who approved it, when, the exact contract and the exact test, and how it was verified.",
       "if": { "properties": { "approval": { "properties": { "status": { "const": "approved" } } } } },
       "then": {
@@ -220,6 +270,7 @@
     "contractId": { "type": "string", "pattern": "^ER-[A-Z]+-\\d{3,}$" },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "gitSha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+    "dimension": { "type": "object", "additionalProperties": false, "required": ["result", "detail"], "properties": { "result": { "enum": ["pass", "fail", "not_run"] }, "detail": { "type": "string" } } },
     "timestamp": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(?::\\d{2}(?:\\.\\d+)?)?(?:Z|[+-]\\d{2}:\\d{2})$" },
     "ident": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
     "dotted": { "type": "string", "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$" }

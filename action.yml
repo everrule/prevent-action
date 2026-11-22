@@ -3,7 +3,7 @@ description: "Runs the approved prevention contracts in .everrule/contracts whos
 author: "EverRule"
 inputs:
   mode:
-    description: "evaluate (the required everrule check) or verify (proves each draft's test fails at its base commit and passes at its merge commit)"
+    description: "evaluate (the required everrule check), verify (proves each draft's test fails at its base commit and passes at its merge commit) or diagnose (searches history for the earliest commit where a draft's test fails)"
     default: "evaluate"
   working-directory:
     description: "Directory the contracts' paths are relative to: the repository root, or a service folder in a monorepo"
@@ -17,6 +17,12 @@ inputs:
   install-command:
     description: "verify mode: the command that installs dependencies, run in each worktree (the broken and fixed commits) from that revision's own lockfile. Empty links the current checkout's node_modules instead, which the evidence records as a limitation."
     default: ""
+  depth:
+    description: "diagnose mode: how many first-parent commits behind the failing revision to search"
+    default: "50"
+  max-runs:
+    description: "diagnose mode: the most test runs to spend on one draft"
+    default: "12"
   timeout-minutes:
     description: "Time limit for each contract's test; a test still running is stopped and reported as an infrastructure error (exit 3, TIMEOUT)"
     default: "10"
@@ -33,10 +39,10 @@ runs:
       env:
         MODE: ${{ inputs.mode }}
       run: |
-        rm -f "$RUNNER_TEMP/everrule-evaluation.json" "$RUNNER_TEMP/everrule-changed.txt" "$RUNNER_TEMP/everrule-verification.json"
+        rm -f "$RUNNER_TEMP/everrule-evaluation.json" "$RUNNER_TEMP/everrule-changed.txt" "$RUNNER_TEMP/everrule-verification.json" "$RUNNER_TEMP/everrule-diagnosis.json"
         case "$MODE" in
-          evaluate|verify) ;;
-          *) echo "::error::unknown mode '$MODE' (expected evaluate or verify)"; exit 3 ;;
+          evaluate|verify|diagnose) ;;
+          *) echo "::error::unknown mode '$MODE' (expected evaluate, verify or diagnose)"; exit 3 ;;
         esac
     - name: Verify drafts
       if: inputs.mode == 'verify'
@@ -54,6 +60,25 @@ runs:
       with:
         name: everrule-verification
         path: ${{ runner.temp }}/everrule-verification.json
+        if-no-files-found: ignore
+    - name: Diagnose drafts
+      if: inputs.mode == 'diagnose'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CONTRACTS_DIR: ${{ inputs.contracts-dir }}
+        INSTALL_COMMAND: ${{ inputs.install-command }}
+        DEPTH: ${{ inputs.depth }}
+        MAX_RUNS: ${{ inputs.max-runs }}
+      run: |
+        # Exit 0 whenever the search completed: what it found is in the record, for a person to read.
+        node "$GITHUB_ACTION_PATH/dist/everrule-evaluate.mjs" diagnose --contracts "$CONTRACTS_DIR" --depth "$DEPTH" --max-runs "$MAX_RUNS" ${INSTALL_COMMAND:+--install "$INSTALL_COMMAND"} --out "$RUNNER_TEMP/everrule-diagnosis.json"
+    - name: Upload diagnosis record
+      if: always() && inputs.mode == 'diagnose'
+      uses: actions/upload-artifact@v7
+      with:
+        name: everrule-diagnosis
+        path: ${{ runner.temp }}/everrule-diagnosis.json
         if-no-files-found: ignore
     - name: Changed files
       if: inputs.mode == 'evaluate'

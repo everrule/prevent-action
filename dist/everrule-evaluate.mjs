@@ -8,10 +8,10 @@ var __export = (target, all) => {
 };
 
 // packages/prevention-contract/src/cli.ts
-import { spawnSync as spawnSync3 } from "node:child_process";
-import { readdirSync as readdirSync2, readFileSync as readFileSync4, writeFileSync as writeFileSync3, appendFileSync, existsSync as existsSync5, mkdtempSync, rmSync as rmSync2 } from "node:fs";
+import { spawnSync as spawnSync4 } from "node:child_process";
+import { readdirSync as readdirSync2, readFileSync as readFileSync5, writeFileSync as writeFileSync3, appendFileSync, existsSync as existsSync6, mkdtempSync, rmSync as rmSync2 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname as dirname3, join as join4 } from "node:path";
+import { dirname as dirname3, join as join5 } from "node:path";
 
 // packages/prevention-contract/src/evaluate.ts
 import { createHash } from "node:crypto";
@@ -4208,6 +4208,8 @@ var FailureClass = external_exports.enum([
   "other"
 ]);
 var Runner = external_exports.enum(["node-test", "vitest", "jest", "pytest"]);
+var Dimension = external_exports.object({ result: external_exports.enum(["pass", "fail", "not_run"]), detail: external_exports.string() }).strict();
+var Dimensions = external_exports.object({ behavior: Dimension, incident_resolution: Dimension, regression_safety: Dimension, integrity: Dimension }).strict();
 var Verification = external_exports.discriminatedUnion("mode", [
   external_exports.object({
     mode: external_exports.literal("exact"),
@@ -4221,13 +4223,26 @@ var Verification = external_exports.discriminatedUnion("mode", [
     binding_set_digest: external_exports.string().optional(),
     intent_digest: external_exports.string().optional(),
     candidate_digest: external_exports.string().optional(),
-    verification_protocol_version: external_exports.string().optional()
+    verification_protocol_version: external_exports.string().optional(),
+    /** Phase A: the four results behind this verification, each on its own. Optional, so contracts without it keep their hash. */
+    dimensions: Dimensions.optional()
   }).strict(),
   external_exports.object({
     mode: external_exports.literal("effect_boundary"),
     limitation: external_exports.string().min(1),
     fixed_revision: external_exports.string().min(7).optional(),
     verified_at: external_exports.string()
+  }).strict(),
+  /**
+   * Phase A: the failure is shown at the broken revision and the resolution was made outside the
+   * repository (a production setting, a flag, a data repair), so no fix is verified. Only with
+   * resolution.kind "outside_repository". Never shown as verified.
+   */
+  external_exports.object({
+    mode: external_exports.literal("reproduced"),
+    broken_revision: external_exports.string().min(7),
+    broken_result: external_exports.literal("fail"),
+    reproduced_at: external_exports.string()
   }).strict(),
   /** Team-written contracts only: a rule not proven against a failing commit, with the team's written basis. Never shown as proven. */
   external_exports.object({
@@ -4328,9 +4343,11 @@ var PreventionContract = external_exports.preprocess(teamDefaults, external_expo
   /** Burn-in: until advisory_until, failures are warnings. At most MAX_ADVISORY_DAYS after approval. */
   enforcement: external_exports.object({ advisory_until: Timestamp.optional() }).strict().optional(),
   /** On drafts: the fix PR's base and merge commits that verify mode runs the test at. */
-  verification_target: external_exports.object({ base: GitSha, merge: GitSha }).strict().optional(),
+  verification_target: external_exports.object({ base: GitSha, merge: GitSha.optional() }).strict().optional(),
   /** What verification showed. A draft may not have one yet; an approved contract must. */
   verification: Verification.optional(),
+  /** Phase A: how the incident was resolved. Optional and absent on every earlier contract, so their hashes are unchanged. */
+  resolution: external_exports.object({ kind: external_exports.enum(["repository", "outside_repository"]), revision: GitSha.optional(), note: external_exports.string().min(1).optional() }).strict().optional(),
   loopholes: external_exports.array(LoopholeResult).default([]),
   approval: Approval,
   ownership: external_exports.object({
@@ -4342,6 +4359,10 @@ var PreventionContract = external_exports.preprocess(teamDefaults, external_expo
   if (c.approval.superseded_by === c.id) ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["approval", "superseded_by"], message: "a contract cannot supersede itself" });
   if (originOf(c) === "incident" && !c.incident) ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["incident"], message: "required when origin is incident (the default)" });
   if (c.verification?.mode === "asserted" && originOf(c) !== "team") ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["verification", "mode"], message: "asserted is only for team-written contracts (origin: team); an incident contract is proven against its failing commit" });
+  const outside = c.resolution?.kind === "outside_repository";
+  if (c.verification?.mode === "reproduced" && !outside) ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["verification", "mode"], message: "reproduced is only for a resolution made outside the repository (resolution.kind: outside_repository); a repository fix is verified" });
+  if (outside && c.verification && c.verification.mode !== "reproduced") ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["resolution", "kind"], message: "a resolution outside the repository cannot be verified; its verification is reproduced" });
+  if (outside && c.resolution?.revision) ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["resolution", "revision"], message: "a resolution outside the repository has no revision" });
   const until = c.enforcement?.advisory_until;
   const approvedAt = c.approval.approved_at;
   if (until && approvedAt && isZonedTimestamp(until) && isZonedTimestamp(approvedAt)) {
@@ -4462,6 +4483,27 @@ var EvaluationRecord = external_exports.object({
   /** In order of precedence: integrity_fail (exit 2), infra_error (3), behavior_fail (1), then pass or no_applicable_contracts (0). */
   status: external_exports.enum(["pass", "behavior_fail", "infra_error", "integrity_fail", "no_applicable_contracts"])
 }).strict();
+var DIAGNOSIS_SCHEMA = "everrule-diagnosis/v1";
+var Change = external_exports.object({ revision: external_exports.string(), subject: external_exports.string(), pull_request: external_exports.number().int().positive().optional() }).strict();
+var DiagnosisResult = external_exports.object({
+  id: external_exports.string(),
+  candidate_digest: external_exports.string(),
+  range: external_exports.object({ head: external_exports.string(), oldest: external_exports.string(), commits: external_exports.number().int().positive(), first_parent: external_exports.literal(true) }).strict(),
+  probes: external_exports.array(external_exports.object({ revision: external_exports.string(), result: external_exports.enum(["fail", "pass", "unknown"]), run_result: external_exports.string(), assertion_id: external_exports.string().optional(), detail: external_exports.string().optional() }).strict()),
+  conclusion: external_exports.enum(["introduced_by", "introduced_within", "fails_throughout_range", "no_reproduction_at_head", "budget_exhausted"]),
+  earliest_failing: external_exports.string().nullable(),
+  last_passing: external_exports.string().nullable(),
+  introducing: external_exports.array(Change),
+  limits: external_exports.array(external_exports.string())
+}).strict();
+var DiagnosisReport = external_exports.object({
+  schema: external_exports.literal(DIAGNOSIS_SCHEMA),
+  generated_at: external_exports.string(),
+  results: external_exports.array(DiagnosisResult),
+  skipped: external_exports.array(external_exports.string()),
+  errors: external_exports.array(external_exports.object({ id: external_exports.string(), detail: external_exports.string() }).strict()),
+  status: external_exports.enum(["diagnosed", "not_diagnosed", "nothing_to_diagnose", "error"])
+}).strict();
 var VERIFICATION_SCHEMA = "everrule-verification/v1";
 var VerificationResult = external_exports.object({
   id: external_exports.string(),
@@ -4470,8 +4512,10 @@ var VerificationResult = external_exports.object({
   /** package: .everrule/verify/<id>/ held EverRule's session and manifest. contract: built from the draft alone. */
   session_source: external_exports.enum(["package", "contract"]),
   evidence: external_exports.record(external_exports.unknown()),
-  outcome: external_exports.enum(["exact", "flaky", "not_exact"]),
-  detail: external_exports.string()
+  outcome: external_exports.enum(["exact", "flaky", "not_exact", "reproduced", "does_not_reproduce", "not_established"]),
+  detail: external_exports.string(),
+  /** Only for a full verification (a fix named). Never folded into one result; `outcome` stays the summary. */
+  dimensions: Dimensions.optional()
 }).strict();
 var VerificationReport = external_exports.object({
   schema: external_exports.literal(VERIFICATION_SCHEMA),
@@ -4481,7 +4525,7 @@ var VerificationReport = external_exports.object({
   skipped: external_exports.array(external_exports.string()),
   /** Drafts the protocol could not run for (exit 3): nothing about their behavior is known. */
   errors: external_exports.array(external_exports.object({ id: external_exports.string(), detail: external_exports.string() }).strict()),
-  status: external_exports.enum(["exact", "not_exact", "nothing_to_verify", "error"])
+  status: external_exports.enum(["exact", "reproduced", "not_exact", "nothing_to_verify", "error"])
 }).strict();
 
 // packages/prevention-contract/src/evaluate.ts
@@ -4552,7 +4596,7 @@ function classifyRun(run2, report, reportState, testPath) {
   const infra = (subtype, detail, r) => ({ result: "INFRA_ERROR", subtype, detail, ...r ? counts(r) : none });
   if (run2.timed_out) return infra("TIMEOUT", `the test did not finish within the time limit and was stopped.`, report ?? void 0);
   if (run2.spawn_error) return infra("RUNNER_CRASH", run2.spawn_error);
-  if (reportState === "missing" || !report) return infra("NO_REPORT", reportState === "unreadable" ? "the runner's report could not be read." : `the runner wrote no report (exit ${run2.exit_code ?? run2.signal}).`);
+  if (reportState !== "read" || !report) return infra("NO_REPORT", reportState === "unreadable" ? "the runner's report could not be read." : `the runner wrote no report (exit ${run2.exit_code ?? run2.signal}).`);
   if (!report.found) return infra("NO_REPORT", `the runner's report does not include ${testPath}.`);
   if (report.failed > 0 && run2.exit_code !== 0 && run2.exit_code !== null) return { result: "BEHAVIOR_FAIL", detail: `${report.failed} of ${report.executed} test cases failed.`, ...counts(report) };
   if (report.load_error) return infra("DEPENDENCY_OR_SETUP", `${testPath} could not load or set up: ${report.load_error}`, report);
@@ -4671,6 +4715,7 @@ function summarize(record, contracts) {
     if (v?.mode === "exact") lines.push(`  - verified: fails at ${v.broken_revision.slice(0, 7)}, passes at ${v.fixed_revision.slice(0, 7)}`);
     else if (v?.mode === "effect_boundary") lines.push(`  - verification: effect-boundary reproduction; ${v.limitation}`);
     else if (v?.mode === "asserted") lines.push(`  - not proven against a failure; the team's basis: ${v.basis}`);
+    else if (v?.mode === "reproduced") lines.push(`  - reproduced: fails at ${v.broken_revision.slice(0, 7)}; resolved outside the repository, not verified${c?.resolution?.note ? ` (${c.resolution.note})` : ""}`);
     if (a.result !== "PASS") lines.push(`  - ${a.detail}${a.failed_cases.length ? ` Failed: ${a.failed_cases.join("; ")}.` : ""}`);
   }
   const unverified = notVerified(record, byId);
@@ -4692,6 +4737,7 @@ function notVerified(record, byId) {
     if (a.result === "INFRA_ERROR") out.push(`**${a.id}**: its test could not run, so this change was not checked against it.`);
     const v = c?.verification;
     if (v?.mode === "asserted") out.push(`**${a.id}**: team-written, not proven against a failure.`);
+    if (v?.mode === "reproduced") out.push(`**${a.id}**: resolved outside the repository, so no fix is verified.`);
     if (v?.mode === "effect_boundary") out.push(`**${a.id}**: proven at the service boundary, not on the original commits. ${v.limitation}`);
     for (const l of c?.loopholes ?? []) {
       if (l.result !== "holds") out.push(`**${a.id}**: ${l.title} is not covered by the test${l.result === "owner_decides" ? "; left to the owner at approval" : ""}.`);
@@ -4800,6 +4846,9 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: everrule/prevent-action@v1
         with: { mode: verify }
+      # For a draft with no fix yet: where the failure first appears in history. Does nothing otherwise.
+      - uses: everrule/prevent-action@v1
+        with: { mode: diagnose }
 `;
 var FIRST_TEST = {
   vitest: ".everrule/tests/first-rule.test.js",
@@ -4881,24 +4930,37 @@ function childEnv() {
   const { NODE_TEST_CONTEXT: _ctx, ...env } = process.env;
   return env;
 }
-function runProtocol(input) {
+function assertCandidate(input) {
   const { session, manifest } = input;
   if (digestOf(input.candidate) !== manifest.artifact.digest) throw new ProtocolError("the candidate bytes do not match the manifest");
   if (digestOf(input.candidate) !== session.candidate_artifact_digest) throw new ProtocolError("the candidate bytes do not match the session");
   const adopted = manifest.artifact.adopted_test?.test_name ?? null;
   if (adopted && input.runner !== "vitest" && input.runner !== "jest") throw new ProtocolError(`an adopted test is selected by name, which ${input.runner} is not supported for`);
-  const fixed = revisionEvidence(input, "fixed", session.fixed_sha, FIXED_RUNS);
+}
+function runProtocol(input) {
+  const { session, manifest } = input;
+  assertCandidate(input);
+  const fixed = session.fixed_sha ? revisionEvidence(input, "fixed", session.fixed_sha, FIXED_RUNS) : null;
   const broken = revisionEvidence(input, "broken", session.broken_sha, BROKEN_RUNS);
   const b = broken.runs[0];
   return {
-    schema_version: "1.0",
+    schema_version: fixed ? "1.0" : "1.1",
     verification_id: session.verification_session_id,
     candidate_digest: manifest.candidate_digest,
     verification_protocol_version: session.verification_protocol_version,
     producer: { identity: input.producer, execution_id: randomUUID(), host_platform: `${process.platform}-${process.arch}` },
-    fixed: { ...fixed, repeated_runs: fixed.runs.length, normalized_results: fixed.runs.map((r) => r.result), discovered_test_count: fixed.runs[0]?.discovered ?? 0, executed_test_count: fixed.runs[0]?.executed ?? 0 },
+    ...fixed ? { fixed: { ...fixed, repeated_runs: fixed.runs.length, normalized_results: fixed.runs.map((r) => r.result), discovered_test_count: fixed.runs[0]?.discovered ?? 0, executed_test_count: fixed.runs[0]?.executed ?? 0 } } : {},
     broken: { ...broken, result: b.result, discovered_test_count: b.discovered, executed_test_count: b.executed, ...b.assertion_id ? { assertion_id: b.assertion_id, expected: b.expected, actual: b.actual } : {} }
   };
+}
+function probeRevision(input, revision) {
+  assertCandidate(input);
+  try {
+    return revisionEvidence(input, "probe", revision, 1).runs[0];
+  } catch (e) {
+    if (e instanceof ProtocolError) return { result: "RUNNER_ERROR", discovered: 0, executed: 0, detail: e.message };
+    throw e;
+  }
 }
 function revisionEvidence(input, name, revision, runs) {
   const { dir, cwd, target, notes } = prepare(input, name, revision);
@@ -4935,7 +4997,7 @@ function prepare(input, name, revision) {
   if (manifest.artifact.adopted_test) {
     const present = existsSync3(target) ? digestOf(readFileSync2(target)) : null;
     if (name === "fixed" && present !== manifest.artifact.digest) throw new ProtocolError(`${manifest.artifact.path} at ${revision} is not the adopted test's exact bytes`);
-    if (name === "broken" && present !== manifest.artifact.digest) {
+    if (name !== "fixed" && present !== manifest.artifact.digest) {
       mkdirSync2(path.dirname(target), { recursive: true });
       writeFileSync2(target, input.candidate);
       notes.push(present ? "the adopted test's own earlier version was replaced by the exact candidate in the temporary worktree" : "the adopted test did not exist at this commit; the exact candidate was placed in the temporary worktree");
@@ -5058,26 +5120,47 @@ function sessionFor(c, cwd, broken, fixed, candidate) {
   if (existsSync4(join3(dir, "session.json")) || existsSync4(join3(dir, "manifest.json"))) {
     const session = JSON.parse(readFileSync3(join3(dir, "session.json"), "utf8"));
     const manifest = JSON.parse(readFileSync3(join3(dir, "manifest.json"), "utf8"));
-    if (session.broken_sha !== broken || session.fixed_sha !== fixed) throw new ProtocolError(`the session's revisions (${session.broken_sha?.slice(0, 12)}, ${session.fixed_sha?.slice(0, 12)}) are not the draft's verification_target`);
+    if (session.broken_sha !== broken || session.fixed_sha !== fixed) throw new ProtocolError(`the session's revisions (${session.broken_sha?.slice(0, 12)}, ${session.fixed_sha?.slice(0, 12) ?? "no fix"}) are not the draft's verification_target`);
     if (manifest.artifact?.path !== c.test.path) throw new ProtocolError(`the manifest's candidate is ${manifest.artifact?.path}, not the draft's test ${c.test.path}`);
     return { session, manifest, source: "package" };
   }
   const digest = digestOf(candidate);
   return {
-    session: { verification_session_id: c.id, candidate_digest: digest, candidate_artifact_digest: digest, verification_protocol_version: VERIFICATION_PROTOCOL, broken_sha: broken, fixed_sha: fixed },
+    session: { verification_session_id: c.id, candidate_digest: digest, candidate_artifact_digest: digest, verification_protocol_version: VERIFICATION_PROTOCOL, broken_sha: broken, ...fixed ? { fixed_sha: fixed } : {} },
     manifest: { candidate_digest: digest, artifact: { path: c.test.path, digest }, assertion_map: {} },
     source: "contract"
   };
 }
 function outcomeOf(e) {
-  const fixed = e.fixed.normalized_results;
   const at = (sha) => sha.slice(0, 7);
+  const values = e.broken.expected !== void 0 ? ` (expected ${e.broken.expected}, actual ${e.broken.actual})` : "";
+  if (!e.fixed) {
+    if (e.broken.result === "BEHAVIORAL_ASSERTION_FAILURE") return { outcome: "reproduced", detail: `fails at ${at(e.broken.revision)} at ${e.broken.assertion_id}${values}.` };
+    if (e.broken.result === "PASS") return { outcome: "does_not_reproduce", detail: `the test passes at ${at(e.broken.revision)}, so it does not reproduce the failure.` };
+    return { outcome: "not_established", detail: `the test fails at ${at(e.broken.revision)} without a behavioral assertion (${e.broken.result}); an error is not proof.` };
+  }
+  const fixed = e.fixed.normalized_results;
   if (new Set(fixed).size > 1) return { outcome: "flaky", detail: `the runs at the fix ${at(e.fixed.revision)} disagree: ${fixed.join(", ")}.` };
   if (fixed.length !== FIXED_RUNS || fixed[0] !== "PASS") return { outcome: "not_exact", detail: `the test does not pass at the fix ${at(e.fixed.revision)} (${fixed[0]}).` };
   if (e.broken.result === "PASS") return { outcome: "not_exact", detail: `the test also passes at the broken commit ${at(e.broken.revision)}, so it does not reproduce the incident.` };
   if (e.broken.result !== "BEHAVIORAL_ASSERTION_FAILURE") return { outcome: "not_exact", detail: `the test fails at the broken commit ${at(e.broken.revision)} without a behavioral assertion (${e.broken.result}); an error is not proof.` };
-  const values = e.broken.expected !== void 0 ? ` (expected ${e.broken.expected}, actual ${e.broken.actual})` : "";
   return { outcome: "exact", detail: `passes ${FIXED_RUNS} times at ${at(e.fixed.revision)}; fails at ${at(e.broken.revision)} at ${e.broken.assertion_id}${values}.` };
+}
+function dimensionsOf(e, session) {
+  if (!e.fixed) return void 0;
+  const at = (sha) => sha.slice(0, 7);
+  const runs = e.fixed.normalized_results;
+  const passes = runs.filter((r) => r === "PASS").length;
+  const behavior = runs.length === FIXED_RUNS && passes === FIXED_RUNS;
+  const reproduced = e.broken.result === "BEHAVIORAL_ASSERTION_FAILURE";
+  const same2 = e.fixed.candidate_artifact_digest === session.candidate_artifact_digest && e.broken.candidate_artifact_digest === session.candidate_artifact_digest;
+  const revisions = e.fixed.revision === session.fixed_sha && e.broken.revision === session.broken_sha;
+  return {
+    behavior: { result: behavior ? "pass" : "fail", detail: `passes ${passes} of ${runs.length} at ${at(e.fixed.revision)}.` },
+    incident_resolution: !reproduced ? { result: "fail", detail: `the failure was not reproduced at ${at(e.broken.revision)} (${e.broken.result}), so nothing shows it was resolved.` } : behavior ? { result: "pass", detail: `fails at ${at(e.broken.revision)} at ${e.broken.assertion_id} and no longer fails at ${at(e.fixed.revision)}.` } : { result: "fail", detail: `fails at ${at(e.broken.revision)} at ${e.broken.assertion_id} and still fails at ${at(e.fixed.revision)}.` },
+    regression_safety: { result: "not_run", detail: "not run by this tool; your own CI's checks on this commit cover it." },
+    integrity: same2 && revisions ? { result: "pass", detail: `the same test bytes at both revisions, ${at(e.broken.revision)} and ${at(e.fixed.revision)}, as the session names.` } : { result: "fail", detail: !same2 ? "the test bytes that ran are not the ones the session names." : "the revisions that ran are not the ones the session names." }
+  };
 }
 function verifyDrafts(opts) {
   const now = opts.now ?? (() => /* @__PURE__ */ new Date());
@@ -5096,28 +5179,155 @@ function verifyDrafts(opts) {
       const candidate = readFileSync3(testFile);
       if (c.test.sha256 && digestOf(candidate) !== `sha256:${c.test.sha256}`) throw new ProtocolError(`${c.test.path} does not match the draft's test.sha256`);
       const broken = git2(root, ["rev-parse", "--verify", `${target.base}^{commit}`]);
-      const fixed = git2(root, ["rev-parse", "--verify", `${target.merge}^{commit}`]);
+      const fixed = target.merge ? git2(root, ["rev-parse", "--verify", `${target.merge}^{commit}`]) : void 0;
       const { session, manifest, source } = sessionFor(c, opts.cwd, broken, fixed, candidate);
       const evidence = runProtocol({ repo: root, prefix, session, manifest, candidate, runner: c.test.runner, deps: "link", ...opts.install ? { install: opts.install } : {}, timeoutMs: opts.timeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS, producer: VERIFY_PRODUCER });
-      results.push({ id: c.id, test: c.test.path, runner: c.test.runner, session_source: source, evidence, ...outcomeOf(evidence) });
+      results.push({ id: c.id, test: c.test.path, runner: c.test.runner, session_source: source, evidence, ...outcomeOf(evidence), ...dimensionsOf(evidence, session) ? { dimensions: dimensionsOf(evidence, session) } : {} });
     } catch (e) {
       if (!(e instanceof ProtocolError)) throw e;
       errors.push({ id: c.id, detail: e.message });
     }
   }
-  const status = errors.length ? "error" : results.length === 0 ? "nothing_to_verify" : results.every((r) => r.outcome === "exact") ? "exact" : "not_exact";
+  const proven = results.every((r) => r.outcome === "exact" || r.outcome === "reproduced");
+  const status = errors.length ? "error" : results.length === 0 ? "nothing_to_verify" : !proven ? "not_exact" : results.some((r) => r.outcome === "reproduced") ? "reproduced" : "exact";
   return { schema: VERIFICATION_SCHEMA, generated_at: now().toISOString(), results, skipped, errors, status };
 }
 function summarizeVerification(report) {
-  const head = report.status === "exact" ? "EverRule verify: every draft fails at its broken commit and passes at its fix" : report.status === "not_exact" ? "EverRule verify: a draft did not verify exactly" : report.status === "error" ? "EverRule verify: the protocol could not run for a draft" : "EverRule verify: no draft has a verification target";
+  const head = report.status === "exact" ? "EverRule verify: every draft fails at its broken commit and passes at its fix" : report.status === "reproduced" ? "EverRule verify: every draft reproduces its failure" : report.status === "not_exact" ? "EverRule verify: a draft did not verify exactly" : report.status === "error" ? "EverRule verify: the protocol could not run for a draft" : "EverRule verify: no draft has a verification target";
   const lines = [`## ${head}`, ""];
-  for (const r of report.results) lines.push(`- **${r.id}** ${r.outcome.toUpperCase().replace("_", " ")}: ${r.detail}`, `  - test \`${r.test}\` (${r.runner}); session from the ${r.session_source === "package" ? "pushed package" : "draft"}`);
+  const ROWS = [["behavior", "Behavior"], ["incident_resolution", "Incident resolution"], ["regression_safety", "Regression safety"], ["integrity", "Integrity"]];
+  for (const r of report.results) {
+    lines.push(`- **${r.id}** ${r.outcome.toUpperCase().replace(/_/g, " ")}: ${r.detail}`, `  - test \`${r.test}\` (${r.runner}); session from the ${r.session_source === "package" ? "pushed package" : "draft"}`);
+    if (r.dimensions) for (const [key, label] of ROWS) lines.push(`  - ${label}: ${r.dimensions[key].result.replace("_", " ")}. ${r.dimensions[key].detail}`);
+  }
   for (const e of report.errors) lines.push(`- **${e.id}** COULD NOT RUN: ${e.detail}`);
   if (report.skipped.length) lines.push("", `No verification_target, not run: ${report.skipped.join(", ")}.`);
+  if (report.results.some((r) => ["reproduced", "does_not_reproduce", "not_established"].includes(r.outcome))) lines.push("", "A reproduction is not a verification: it shows the failure at one revision and says nothing about a fix.");
   lines.push("", "This is evidence for EverRule to classify and for the approver. It does not approve anything.");
   return lines.join("\n");
 }
 function exitCodeForVerification(report) {
+  return report.status === "error" ? 3 : 0;
+}
+
+// packages/prevention-contract/src/verify/diagnose.ts
+import { spawnSync as spawnSync3 } from "node:child_process";
+import { existsSync as existsSync5, readFileSync as readFileSync4 } from "node:fs";
+import { join as join4 } from "node:path";
+var DIAGNOSE_PRODUCER = "everrule-evaluate diagnose";
+var DEFAULT_DEPTH = 50;
+var DEFAULT_MAX_RUNS = 12;
+function git3(cwd, args) {
+  const r = spawnSync3("git", args, { cwd, encoding: "utf8" });
+  if (r.status !== 0) throw new ProtocolError(`git ${args.join(" ")}: ${(r.stderr || "failed").trim()}`);
+  return r.stdout.trim();
+}
+var toResult = (r) => r === "BEHAVIORAL_ASSERTION_FAILURE" ? "fail" : r === "PASS" ? "pass" : "unknown";
+function bisect(revisions, probe, maxRuns) {
+  const probes = [];
+  const seen = /* @__PURE__ */ new Map();
+  const run2 = (i) => {
+    const p = probe(revisions[i]);
+    probes.push(p);
+    seen.set(i, p.result);
+    return p.result;
+  };
+  const last = revisions.length - 1;
+  if (run2(0) !== "fail") return { probes, conclusion: "no_reproduction_at_head", earliest_failing: null, last_passing: null, span: [] };
+  let lo = 0;
+  let hi = revisions.length;
+  const done = (conclusion) => ({ probes, conclusion, earliest_failing: revisions[lo], last_passing: hi <= last ? revisions[hi] : null, span: hi <= last ? revisions.slice(lo, hi) : [] });
+  if (last > 0 && probes.length < maxRuns) {
+    const r = run2(last);
+    if (r === "fail") lo = last;
+    else if (r === "pass") hi = last;
+  }
+  while (hi - lo > 1) {
+    const mid = (lo + hi) / 2;
+    const next = [...Array(hi - lo - 1).keys()].map((k) => lo + 1 + k).filter((i) => !seen.has(i)).sort((a, b) => Math.abs(a - mid) - Math.abs(b - mid) || b - a)[0];
+    if (next === void 0) break;
+    if (probes.length >= maxRuns) return done("budget_exhausted");
+    const r = run2(next);
+    if (r === "fail") lo = next;
+    else if (r === "pass") hi = next;
+  }
+  if (hi > last) return { ...done(lo === last ? "fails_throughout_range" : "introduced_within"), span: lo === last ? [] : revisions.slice(lo) };
+  return done(hi - lo === 1 ? "introduced_by" : "introduced_within");
+}
+function diagnoseDrafts(opts) {
+  const now = opts.now ?? (() => /* @__PURE__ */ new Date());
+  const depth = opts.depth ?? DEFAULT_DEPTH;
+  const maxRuns = opts.maxRuns ?? DEFAULT_MAX_RUNS;
+  const drafts = opts.contracts.filter((c) => c.approval.status === "draft");
+  const applies = (c) => c.verification_target && !c.verification_target.merge;
+  const skipped = drafts.filter((c) => !applies(c)).map((c) => c.id);
+  const results = [];
+  const errors = [];
+  const root = git3(opts.cwd, ["rev-parse", "--show-toplevel"]);
+  const prefix = git3(opts.cwd, ["rev-parse", "--show-prefix"]).replace(/\/$/, "");
+  for (const c of drafts.filter(applies)) {
+    try {
+      const testFile = join4(opts.cwd, c.test.path);
+      if (!existsSync5(testFile)) throw new ProtocolError(`test file not found: ${c.test.path}`);
+      const candidate = readFileSync4(testFile);
+      if (c.test.sha256 && digestOf(candidate) !== `sha256:${c.test.sha256}`) throw new ProtocolError(`${c.test.path} does not match the draft's test.sha256`);
+      const head = git3(root, ["rev-parse", "--verify", `${c.verification_target.base}^{commit}`]);
+      const revisions = git3(root, ["rev-list", "--first-parent", `--max-count=${depth + 1}`, head]).split("\n").filter(Boolean);
+      const { session, manifest } = sessionFor(c, opts.cwd, head, void 0, candidate);
+      const input = { repo: root, prefix, session, manifest, candidate, runner: c.test.runner, deps: "link", ...opts.install ? { install: opts.install } : {}, timeoutMs: opts.timeoutMs ?? 12e4, producer: DIAGNOSE_PRODUCER };
+      const found = bisect(revisions, (revision) => {
+        const r = probeRevision(input, revision);
+        return { revision, result: toResult(r.result), run_result: r.result, ...r.assertion_id ? { assertion_id: r.assertion_id } : {}, ...r.detail ? { detail: r.detail.slice(0, 300) } : {} };
+      }, maxRuns);
+      const { span, ...rest } = found;
+      const introducing = span.map((revision) => {
+        const subject = git3(root, ["log", "-1", "--format=%s", revision]);
+        const pr = /^Merge pull request #(\d+)/.exec(subject) ?? /\(#(\d+)\)\s*$/.exec(subject);
+        return { revision, subject, ...pr ? { pull_request: Number(pr[1]) } : {} };
+      });
+      const unknown = found.probes.filter((p) => p.result === "unknown").length;
+      results.push({
+        id: c.id,
+        candidate_digest: manifest.candidate_digest,
+        range: { head, oldest: revisions[revisions.length - 1], commits: revisions.length, first_parent: true },
+        ...rest,
+        introducing,
+        limits: [
+          `Searched ${revisions.length} ${revisions.length === 1 ? "revision" : "revisions"} of first-parent history, back to ${revisions[revisions.length - 1].slice(0, 7)}; anything older or on a merged branch's own commits was not run.`,
+          "Each revision was run once, with the dependencies of the current checkout linked in unless an install command was given.",
+          "The search assumes that once the failure appears it stays; a failure that came and went can mislead it.",
+          ...unknown ? [`${unknown} ${unknown === 1 ? "revision" : "revisions"} could not be run and ${unknown === 1 ? "is" : "are"} recorded as unknown, neither a pass nor a failure.`] : [],
+          "This is the most likely introducing change in the repository's history, not a certain cause: dependencies, configuration, feature flags and data are outside it."
+        ]
+      });
+    } catch (e) {
+      if (!(e instanceof ProtocolError)) throw e;
+      errors.push({ id: c.id, detail: e.message });
+    }
+  }
+  const narrowed = (d) => d.conclusion === "introduced_by" || d.conclusion === "introduced_within";
+  const status = errors.length ? "error" : results.length === 0 ? "nothing_to_diagnose" : results.every(narrowed) ? "diagnosed" : "not_diagnosed";
+  return { schema: DIAGNOSIS_SCHEMA, generated_at: now().toISOString(), results, skipped, errors, status };
+}
+function summarizeDiagnosis(report) {
+  const at = (sha) => `\`${sha.slice(0, 7)}\``;
+  const change = (c) => `${at(c.revision)} ${c.subject}${c.pull_request ? `, pull request #${c.pull_request}` : ""}`;
+  const head = report.status === "diagnosed" ? "EverRule diagnose: the most likely introducing change was found" : report.status === "not_diagnosed" ? "EverRule diagnose: the search did not narrow to a change" : report.status === "error" ? "EverRule diagnose: the search could not run for a draft" : "EverRule diagnose: no draft has a reproduction to diagnose";
+  const lines = [`## ${head}`, ""];
+  for (const d of report.results) {
+    const said = d.conclusion === "introduced_by" ? `most likely introduced by ${change(d.introducing[0])}. The test last passes at ${at(d.last_passing)}.` : d.conclusion === "introduced_within" ? d.last_passing ? `most likely introduced by one of ${d.introducing.length} changes after ${at(d.last_passing)}, which could not be told apart: ${d.introducing.map(change).join("; ")}.` : `first seen failing at ${at(d.earliest_failing)}; no revision in the range was seen passing, so the change could be any of: ${d.introducing.map(change).join("; ")}.` : d.conclusion === "fails_throughout_range" ? `fails at every revision searched, back to ${at(d.range.oldest)}. It was introduced before the searched range; search further back with --depth.` : d.conclusion === "no_reproduction_at_head" ? `does not fail at ${at(d.range.head)} (${d.probes[0].run_result}), so there is nothing to diagnose. Reproduce it first.` : `stopped after ${d.probes.length} runs. So far: fails at ${at(d.earliest_failing)}${d.last_passing ? `, passes at ${at(d.last_passing)}` : ""}; ${d.introducing.length} changes remain between them. Raise --max-runs to continue.`;
+    lines.push(`- **${d.id}**: ${said}`);
+    lines.push(`  - runs: ${d.probes.map((p) => `${at(p.revision)} ${p.result}`).join(", ")}`);
+    const unknown = d.probes.filter((p) => p.result === "unknown");
+    if (unknown.length) lines.push(`  - could not be run: ${unknown.map((p) => `${at(p.revision)} (${p.run_result})`).join(", ")}`);
+    lines.push("  - Limits:", ...d.limits.map((l) => `    - ${l}`));
+  }
+  for (const e of report.errors) lines.push(`- **${e.id}** COULD NOT RUN: ${e.detail}`);
+  if (report.skipped.length) lines.push("", `Not diagnosed (no reproduction target, or a fix is already named): ${report.skipped.join(", ")}.`);
+  lines.push("", "This is evidence about the repository's history for a person to read. It does not approve anything.");
+  return lines.join("\n");
+}
+function exitCodeForDiagnosis(report) {
   return report.status === "error" ? 3 : 0;
 }
 
@@ -5227,6 +5437,8 @@ function explainRegression(i) {
     lines.push("");
   } else if (v?.mode === "effect_boundary") {
     lines.push(`**How it was proven:** at the effect boundary. ${v.limitation}`, "");
+  } else if (v?.mode === "reproduced") {
+    lines.push(`**How it was resolved before:** outside the repository${c.resolution?.note ? ` (${c.resolution.note})` : ""}, so there is no fix in the code to restore. The rule was shown failing at \`${v.broken_revision.slice(0, 7)}\`.`, "");
   } else if (v?.mode === "asserted") {
     lines.push(`**Basis:** team-written and not proven against a failure. ${v.basis}`, "");
   }
@@ -5267,9 +5479,9 @@ function arg(name, fallback) {
   throw new Error(`missing --${name}`);
 }
 function loadContracts(dir) {
-  if (!existsSync5(dir)) return [];
+  if (!existsSync6(dir)) return [];
   return readdirSync2(dir).filter((f) => f.endsWith(".json")).sort().map((f) => {
-    const parsed = PreventionContract.safeParse(JSON.parse(readFileSync4(join4(dir, f), "utf8")));
+    const parsed = PreventionContract.safeParse(JSON.parse(readFileSync5(join5(dir, f), "utf8")));
     if (!parsed.success) throw new ContractError(`${f}: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
     return parsed.data;
   });
@@ -5278,33 +5490,33 @@ var ContractError = class extends Error {
 };
 var readIfPresent = (path2) => {
   try {
-    return readFileSync4(path2, "utf8");
+    return readFileSync5(path2, "utf8");
   } catch {
     return null;
   }
 };
-var readTest = (path2) => existsSync5(path2) ? readFileSync4(path2, "utf8") : null;
+var readTest = (path2) => existsSync6(path2) ? readFileSync5(path2, "utf8") : null;
 function readBaseContracts(base, dir) {
-  const git3 = (args) => {
-    const r = spawnSync3("git", args, { encoding: "utf8" });
+  const git4 = (args) => {
+    const r = spawnSync4("git", args, { encoding: "utf8" });
     if (r.status !== 0) throw new Error((r.stderr || `git ${args[0]} failed`).trim());
     return r.stdout;
   };
   const prefix = dir.replace(/\/+$/, "");
-  return git3(["ls-tree", "--name-only", base, "--", `${prefix}/`]).split("\n").map((s) => s.trim()).filter((f) => f.endsWith(".json")).flatMap((f) => {
-    const raw = JSON.parse(git3(["show", `${base}:./${f}`]));
+  return git4(["ls-tree", "--name-only", base, "--", `${prefix}/`]).split("\n").map((s) => s.trim()).filter((f) => f.endsWith(".json")).flatMap((f) => {
+    const raw = JSON.parse(git4(["show", `${base}:./${f}`]));
     return typeof raw.id === "string" ? [{ id: raw.id, status: String(raw.approval?.status ?? "draft") }] : [];
   });
 }
 function hashFor(contractFile) {
-  const raw = JSON.parse(readFileSync4(contractFile, "utf8"));
+  const raw = JSON.parse(readFileSync5(contractFile, "utf8"));
   const source = readTest(raw?.test?.path ?? "");
   if (source === null) throw new Error(`test file not found: ${raw?.test?.path} (run from the repository root)`);
   return approvalHashes(raw, source);
 }
 function approve(contractFile, name, role) {
   const h = hashFor(contractFile);
-  const raw = JSON.parse(readFileSync4(contractFile, "utf8"));
+  const raw = JSON.parse(readFileSync5(contractFile, "utf8"));
   raw.test.sha256 = h.test_sha256;
   raw.approval = { status: "approved", approver_name: name, approver_role: role, approved_at: (/* @__PURE__ */ new Date()).toISOString(), contract_hash: h.contract_hash };
   const parsed = PreventionContract.safeParse(raw);
@@ -5342,11 +5554,22 @@ approval.contract_hash ${h.contract_hash}`);
     if (process.env["GITHUB_STEP_SUMMARY"]) appendFileSync(process.env["GITHUB_STEP_SUMMARY"], md2 + "\n");
     process.exit(exitCodeForVerification(report));
   }
+  if (process.argv[2] === "diagnose") {
+    const install = process.argv.includes("--install") ? arg("install") : "";
+    const [minutes2, depth, maxRuns] = [arg("timeout", "2"), arg("depth", String(DEFAULT_DEPTH)), arg("max-runs", String(DEFAULT_MAX_RUNS))].map(Number);
+    if (!(minutes2 > 0) || !Number.isInteger(depth) || depth < 1 || !Number.isInteger(maxRuns) || maxRuns < 2) throw new Error("--timeout must be minutes above 0, --depth a whole number of at least 1, --max-runs a whole number of at least 2");
+    const report = diagnoseDrafts({ contracts: loadContracts(arg("contracts", ".everrule/contracts")), cwd: process.cwd(), depth, maxRuns, ...install ? { install } : {}, timeoutMs: minutes2 * 6e4 });
+    writeFileSync3(arg("out", "diagnosis.json"), JSON.stringify(report, null, 2) + "\n");
+    const md2 = summarizeDiagnosis(report);
+    console.log(md2);
+    if (process.env["GITHUB_STEP_SUMMARY"]) appendFileSync(process.env["GITHUB_STEP_SUMMARY"], md2 + "\n");
+    process.exit(exitCodeForDiagnosis(report));
+  }
   const contractsDir = arg("contracts", ".everrule/contracts");
   const changedFile = arg("changed-files");
   const out = arg("out", ".everrule/last-evaluation.json");
   const base = process.argv.includes("--base") ? arg("base") : void 0;
-  const changedFiles = readFileSync4(changedFile, "utf8").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const changedFiles = readFileSync5(changedFile, "utf8").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   const contracts = loadContracts(contractsDir);
   let baseContracts = null;
   let baseError;
@@ -5364,13 +5587,13 @@ approval.contract_hash ${h.contract_hash}`);
   if (process.argv.includes("--event")) {
     const name = process.env["GITHUB_EVENT_NAME"];
     if (!name) throw new Error("--event needs GITHUB_EVENT_NAME, which GitHub Actions sets");
-    event = eventFrom(name, JSON.parse(readFileSync4(arg("event"), "utf8")));
+    event = eventFrom(name, JSON.parse(readFileSync5(arg("event"), "utf8")));
   }
-  const reportDir = mkdtempSync(join4(tmpdir(), "everrule-reports-"));
+  const reportDir = mkdtempSync(join5(tmpdir(), "everrule-reports-"));
   let record;
   const failureMessages = /* @__PURE__ */ new Map();
   try {
-    record = await execute(plan(contracts, changedFiles, integrity), changedFiles, execIn(process.cwd()), { reportDir, cwd: process.cwd(), readFile: readIfPresent, timeoutMs: minutes * 6e4, event, backlog: checkBacklog(readIfPresent(join4(dirname3(contractsDir), "backlog.json"))), onFailure: (id, m) => failureMessages.set(id, m) });
+    record = await execute(plan(contracts, changedFiles, integrity), changedFiles, execIn(process.cwd()), { reportDir, cwd: process.cwd(), readFile: readIfPresent, timeoutMs: minutes * 6e4, event, backlog: checkBacklog(readIfPresent(join5(dirname3(contractsDir), "backlog.json"))), onFailure: (id, m) => failureMessages.set(id, m) });
   } finally {
     rmSync2(reportDir, { recursive: true, force: true });
   }
@@ -5385,11 +5608,11 @@ approval.contract_hash ${h.contract_hash}`);
 }
 function gitDiff(from, to) {
   if (!safeRef(from) || !safeRef(to)) return null;
-  const r = spawnSync3("git", ["diff", "-U0", "--no-color", "--no-ext-diff", "--relative", from, to, "--"], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
+  const r = spawnSync4("git", ["diff", "-U0", "--no-color", "--no-ext-diff", "--relative", from, to, "--"], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
   return r.status === 0 ? r.stdout : null;
 }
 function gitPrefix() {
-  const r = spawnSync3("git", ["rev-parse", "--show-prefix"], { encoding: "utf8" });
+  const r = spawnSync4("git", ["rev-parse", "--show-prefix"], { encoding: "utf8" });
   return r.status === 0 ? r.stdout.trim() : "";
 }
 function run() {
