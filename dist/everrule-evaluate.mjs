@@ -4702,32 +4702,33 @@ function exitCodeFor(record) {
 function summarize(record, contracts) {
   const byId = new Map(contracts.map((c) => [c.id, c]));
   const lines = [];
-  const head = record.status === "pass" ? "EverRule: every applicable prevention contract passed" : record.status === "behavior_fail" ? "EverRule: a prevention contract failed" : record.status === "infra_error" ? "EverRule: a prevention contract's test could not run" : record.status === "integrity_fail" ? "EverRule: a prevention contract was changed without approval" : "EverRule: no prevention contract applies to this change";
+  const n = record.applicable.length;
+  const head = record.status === "pass" ? `EverRule: this change keeps ${n === 1 ? "the rule it touches" : `all ${n} rules it touches`}` : record.status === "behavior_fail" ? "EverRule: this change breaks a rule your team approved" : record.status === "infra_error" ? "EverRule: a rule's test could not run, so this change was not checked" : record.status === "integrity_fail" ? "EverRule: a rule was changed without its owner's approval" : "EverRule: no rule applies to this change";
   lines.push(`## ${head}`, "");
   for (const a of record.applicable) {
     const c = byId.get(a.id);
-    const word = a.result === "PASS" ? "PASS" : a.result === "BEHAVIOR_FAIL" ? "FAIL" : `COULD NOT RUN (${a.subtype})`;
-    const label = a.result !== "PASS" && a.advisory_until ? `${word} (warning: burn-in until ${a.advisory_until.slice(0, 10)})` : word;
-    lines.push(`- **${a.id}** ${label}: ${c?.requirement.statement ?? ""}`);
-    const source = c && originOf(c) === "team" ? "team-written" : `incident ${c?.incident?.id ?? "?"}`;
-    lines.push(`  - ${source}; test \`${a.test}\` (${a.runner}); touched ${a.matched_paths.join(", ")}`);
+    const word = a.result === "PASS" ? "passed" : a.result === "BEHAVIOR_FAIL" ? "failed" : `could not run (${a.subtype})`;
+    const label = a.result !== "PASS" && a.advisory_until ? `${word}, as a warning: in burn-in until ${a.advisory_until.slice(0, 10)}` : word;
+    lines.push(`- **${a.id}** ${label}. ${c?.requirement.statement ?? ""}`);
+    const source = c && originOf(c) === "team" ? "Written by your team" : `From incident ${c?.incident?.id ?? "?"}`;
+    lines.push(`  - ${source}. Test \`${a.test}\` (${a.runner}). This change touches ${a.matched_paths.map((p) => `\`${p}\``).join(", ")}.`);
     const v = c?.verification;
-    if (v?.mode === "exact") lines.push(`  - verified: fails at ${v.broken_revision.slice(0, 7)}, passes at ${v.fixed_revision.slice(0, 7)}`);
-    else if (v?.mode === "effect_boundary") lines.push(`  - verification: effect-boundary reproduction; ${v.limitation}`);
-    else if (v?.mode === "asserted") lines.push(`  - not proven against a failure; the team's basis: ${v.basis}`);
-    else if (v?.mode === "reproduced") lines.push(`  - reproduced: fails at ${v.broken_revision.slice(0, 7)}; resolved outside the repository, not verified${c?.resolution?.note ? ` (${c.resolution.note})` : ""}`);
+    if (v?.mode === "exact") lines.push(`  - Proven before approval: the test failed at \`${v.broken_revision.slice(0, 7)}\`, before the fix, and passes at \`${v.fixed_revision.slice(0, 7)}\`.`);
+    else if (v?.mode === "effect_boundary") lines.push(`  - Proven at the effect boundary, not on the original commits. ${v.limitation}`);
+    else if (v?.mode === "asserted") lines.push(`  - Not proven against a failure. The team's basis: ${v.basis}`);
+    else if (v?.mode === "reproduced") lines.push(`  - Shown failing at \`${v.broken_revision.slice(0, 7)}\`. Resolved outside the repository, not verified${c?.resolution?.note ? `: ${c.resolution.note.replace(/\.$/, "")}` : ""}.`);
     if (a.result !== "PASS") lines.push(`  - ${a.detail}${a.failed_cases.length ? ` Failed: ${a.failed_cases.join("; ")}.` : ""}`);
   }
   const unverified = notVerified(record, byId);
-  if (unverified.length) lines.push("", "Not verified by this check:", ...unverified.map((u) => `- ${u}`));
-  if (record.not_applicable.length) lines.push("", `Not applicable to this change: ${record.not_applicable.join(", ")}.`);
+  if (unverified.length) lines.push("", "**What this check does not show:**", ...unverified.map((u) => `- ${u}`));
+  if (record.not_applicable.length) lines.push("", `Rules this change does not touch, so not run: ${record.not_applicable.join(", ")}.`);
   if (record.integrity.length) {
-    lines.push("", "Changed without approval:");
+    lines.push("", "**Changed without approval:**");
     for (const p of record.integrity) lines.push(`- **${p.id}**: ${p.detail}`);
   }
-  if (record.skipped_unapproved.length) lines.push("", `Drafts not enforced (unapproved): ${record.skipped_unapproved.join(", ")}.`);
+  if (record.skipped_unapproved.length) lines.push("", `Drafts, not approved yet and so not enforced: ${record.skipped_unapproved.join(", ")}.`);
   if (record.backlog.status === "invalid") lines.push("", `Warning: .everrule/backlog.json is invalid, so coverage cannot be read from it (this does not fail the check): ${record.backlog.problems.join("; ")}.`);
-  lines.push("", "EverRule's service was not required to produce this result; the contracts and tests live in this repository.");
+  lines.push("", "This check ran entirely in your CI. Nothing was sent to EverRule.");
   return lines.join("\n");
 }
 function notVerified(record, byId) {
@@ -4736,11 +4737,11 @@ function notVerified(record, byId) {
     const c = byId.get(a.id);
     if (a.result === "INFRA_ERROR") out.push(`**${a.id}**: its test could not run, so this change was not checked against it.`);
     const v = c?.verification;
-    if (v?.mode === "asserted") out.push(`**${a.id}**: team-written, not proven against a failure.`);
+    if (v?.mode === "asserted") out.push(`**${a.id}**: written by your team and not proven against a failure.`);
     if (v?.mode === "reproduced") out.push(`**${a.id}**: resolved outside the repository, so no fix is verified.`);
     if (v?.mode === "effect_boundary") out.push(`**${a.id}**: proven at the service boundary, not on the original commits. ${v.limitation}`);
     for (const l of c?.loopholes ?? []) {
-      if (l.result !== "holds") out.push(`**${a.id}**: ${l.title} is not covered by the test${l.result === "owner_decides" ? "; left to the owner at approval" : ""}.`);
+      if (l.result !== "holds") out.push(`**${a.id}**: ${l.title.charAt(0).toLowerCase()}${l.title.slice(1)} is not covered by the test${l.result === "owner_decides" ? "; the owner accepted that at approval" : ""}.`);
     }
   }
   return out;
@@ -5375,32 +5376,53 @@ function cleanMessage(m) {
   return m.replace(/\u001b\[[0-9;]*m/g, "").split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() && !/^\s*at /.test(l)).slice(0, 3).map((l) => l.trim().slice(0, 200));
 }
 var code = (lines, sign) => ["```diff", ...lines.slice(0, MAX_LINES).map((l) => `${sign}${l}`), ...lines.length > MAX_LINES ? [` … ${lines.length - MAX_LINES} more`] : [], "```"];
+function plainly(c, messages) {
+  if (c.behavior?.profile.id !== "duplicate_side_effect.sequential") return null;
+  for (const m of messages) {
+    const hit = /\brepeat_count: expected (\d+) to (?:be|equal) (\d+)/.exec(m);
+    if (!hit) continue;
+    const noun = c.behavior.observation.concept.split(".").pop().replace(/_/g, " ");
+    return `After the same request was sent twice, it expected **${hit[2]}** ${noun}${hit[2] === "1" ? "" : "s"} and found **${hit[1]}**.`;
+  }
+  return null;
+}
 function explainRegression(i) {
   const c = i.contract;
   const incident = c.incident?.id;
   const title = c.incident?.title;
-  const what = incident ? title ? title.startsWith(incident) ? title : `${incident}: ${title}` : incident : c.id;
+  const what = incident ? title ? title.startsWith(incident) ? title : `${incident}: ${title}` : incident : null;
   const fixOf = incident ? `the fix for ${incident}` : "the fix";
   const inScope = (path2) => matchesScope(c, [path2]).length > 0;
   const level = i.result.advisory_until ? "warning" : "error";
   const prefix = i.pathPrefix ?? "";
-  const lines = [];
-  lines.push(`### ${i.rehearsal ? "Rehearsal: this pull request brings back" : "This pull request brings back"} ${what}`, "");
-  if (i.rehearsal) lines.push("Labelled `everrule:rehearsal`: it shows the protection working and is not counted as a regression caught.", "");
-  if (i.result.advisory_until) lines.push(`This protection is in burn-in until ${i.result.advisory_until.slice(0, 10)}, so this is a warning, not a block.`, "");
   const a = c.approval;
-  lines.push(`**The rule** (${c.id}${a.approver_name ? `, approved by ${a.approver_name}${a.approver_role ? `, ${a.approver_role}` : ""}` : ""}): ${c.requirement.statement}`, "");
-  lines.push(`**What the test saw:** ${i.result.failed_cases.length ? i.result.failed_cases.map((x) => `\`${x}\``).join(", ") : i.result.detail}`);
+  const v = c.verification;
+  const approver = a.approver_name ? `${a.approver_name}${a.approver_role ? ` (${a.approver_role})` : ""}` : "its owner";
+  const at = (sha) => `\`${sha.slice(0, 7)}\``;
+  const lines = [];
+  const does = incident ? `brings back ${incident}` : `breaks ${c.id}, a rule your team approved`;
+  lines.push(`## ${i.rehearsal ? `Rehearsal: this pull request ${does}` : `This pull request ${does}`}`, "");
+  if (i.rehearsal) lines.push("Labelled `everrule:rehearsal`: it shows the protection working and is not counted as a regression caught.", "");
+  const how = v?.mode === "exact" ? `Your team fixed it, and ${approver} approved this rule to protect the fix:` : v?.mode === "reproduced" ? `It was resolved outside the repository, and ${approver} approved this rule to catch it if it returns:` : `${approver} approved this rule:`;
+  lines.push(`${what ? `**${what.replace(/\.$/, "")}.** ` : ""}${what ? how : how.charAt(0).toUpperCase() + how.slice(1)}`, "", `> ${c.requirement.statement}`, "");
+  lines.push(i.result.advisory_until ? `This change breaks that rule. The protection is in burn-in until ${i.result.advisory_until.slice(0, 10)}, so this is a warning, not a block.` : "This change breaks that rule, so the `everrule` check is blocking the merge.", "");
+  lines.push("### What the test saw", "");
   const msg = i.messages.flatMap(cleanMessage).slice(0, 6);
+  const plain = plainly(c, msg);
+  if (plain) lines.push(plain, "");
+  lines.push(i.result.failed_cases.length ? `Failed: ${i.result.failed_cases.map((x) => `\`${x}\``).join(", ")}` : i.result.detail);
   if (msg.length) lines.push("```", ...msg, "```");
   lines.push("");
   const annotations = [];
   const fixAdded = (i.fix?.added ?? []).filter((l) => inScope(l.path));
   const fixRemoved = (i.fix?.removed ?? []).filter((l) => inScope(l.path));
+  let undoes = false;
   if (i.fix && i.change) {
     const undone = i.change.removed.filter((r) => inScope(r.path) && meaningful(r.text) && fixAdded.some((f) => f.path === r.path && same(f.text, r.text)));
     const back = i.change.added.filter((r) => inScope(r.path) && meaningful(r.text) && fixRemoved.some((f) => f.path === r.path && same(f.text, r.text)));
+    lines.push("### Where it comes back", "");
     if (undone.length || back.length) {
+      undoes = true;
       const spots = /* @__PURE__ */ new Map();
       const spot = (path2, line) => {
         const k = `${path2}:${line}`;
@@ -5410,39 +5432,39 @@ function explainRegression(i) {
       for (const r of undone) spot(r.path, r.at).removes.push(r.text);
       for (const r of back) spot(r.path, r.line).restores.push(r.text);
       const n = (k, what2) => k === 1 ? `a line ${fixOf} ${what2}` : `${k} lines ${fixOf} ${what2}`;
-      lines.push("**Where:**");
       for (const sp of spots.values()) {
-        if (sp.removes.length) lines.push(`- \`${sp.path}\` line ${sp.line} removes ${n(sp.removes.length, "added")}:`, ...code(sp.removes, "-"));
-        if (sp.restores.length) lines.push(`- \`${sp.path}\` line ${sp.line} brings back ${n(sp.restores.length, "removed")}:`, ...code(sp.restores, "+"));
+        if (sp.removes.length) lines.push(`\`${sp.path}\`, line ${sp.line}: this change removes ${n(sp.removes.length, "added")}.`, "", ...code(sp.removes, "-"), "");
+        if (sp.restores.length) lines.push(`\`${sp.path}\`, line ${sp.line}: this change brings back ${n(sp.restores.length, "removed")}.`, "", ...code(sp.restores, "+"), "");
         const said = [
           ...sp.removes.length ? [`This change removes ${n(sp.removes.length, "added")}:`, ...sp.removes.map((t) => `  ${t.trim()}`)] : [],
           ...sp.restores.length ? [`This change brings back ${n(sp.restores.length, "removed")}:`, ...sp.restores.map((t) => `  ${t.trim()}`)] : []
         ];
         annotations.push({ level, path: prefix + sp.path, line: sp.line, title: `EverRule: ${incident ?? c.id} would come back`, message: [...said, c.requirement.statement].join("\n") });
       }
-      lines.push("");
     } else {
       const touched = [...new Set([...i.change.added, ...i.change.removed].map((l) => l.path).filter(inScope))];
-      lines.push(`**Where:** this pull request does not remove the fix's lines; it changes the behavior another way, in ${touched.length ? touched.map((p) => `\`${p}\``).join(", ") : "the rule's scope"}.`, "");
+      lines.push(`This pull request does not remove the fix's lines; it changes the behavior another way, in ${touched.length ? touched.map((p) => `\`${p}\``).join(", ") : "the rule's scope"}.`, "");
     }
   }
-  const v = c.verification;
+  lines.push("### What to do", "");
+  const pr = c.incident?.fix_pr;
+  if (v?.mode === "exact") lines.push(`- **Keep the fix.** ${undoes ? "Restore the lines above" : "Restore the behavior the rule describes"}. The original fix is ${pr ? `[${fixOf}](${pr}), ` : ""}commit ${at(v.fixed_revision)}.`);
+  else if (v?.mode === "reproduced") lines.push(`- **Restore the behavior the rule describes.** It was resolved outside the repository${c.resolution?.note ? ` (${c.resolution.note.replace(/\.$/, "")})` : ""}, so there is no fix in the code to restore.`);
+  else lines.push("- **Restore the behavior the rule describes.**");
+  lines.push(`- **Or change the rule.** If the behavior should really change, amend the rule in a pull request and have ${a.approver_name ?? "its owner"} approve it again. The check does not pass on a loosened rule without that approval.`, "");
+  const details = [`- Rule \`${c.id}\`, test \`${i.result.test}\` (${i.result.runner}).`];
+  if (v?.mode === "exact") details.push(`- Proven before approval: the test failed at ${at(v.broken_revision)}, before the fix, and passes at ${at(v.fixed_revision)}.`);
+  else if (v?.mode === "effect_boundary") details.push(`- Proven at the effect boundary, not on the original commits. ${v.limitation}`);
+  else if (v?.mode === "reproduced") details.push(`- Shown failing at ${at(v.broken_revision)}. Resolved outside the repository, so no fix is verified.`);
+  else if (v?.mode === "asserted") details.push(`- Team-written and not proven against a failure. The team's basis: ${v.basis}`);
+  const open = (c.loopholes ?? []).filter((l) => l.result !== "holds").map((l) => l.title.charAt(0).toLowerCase() + l.title.slice(1));
+  if (open.length) details.push(`- Not covered by this rule: ${open.join("; ")}.`);
   if (v?.mode === "exact") {
-    const pr = c.incident?.fix_pr;
-    lines.push(`**How it was fixed before:** ${pr ? `[${fixOf}](${pr})` : fixOf}, from \`${v.broken_revision.slice(0, 7)}\` to \`${v.fixed_revision.slice(0, 7)}\`.`);
-    if (!i.fix) lines.push("Its lines are not shown: the fix's commits are not in this checkout. Check out with `fetch-depth: 0` to see them.");
-    else if (fixAdded.length || fixRemoved.length) {
-      lines.push("Its changes in this rule's scope:", ...code([...fixRemoved.map((l) => `-${l.text}`), ...fixAdded.map((l) => `+${l.text}`)], ""));
-    }
-    lines.push("");
-  } else if (v?.mode === "effect_boundary") {
-    lines.push(`**How it was proven:** at the effect boundary. ${v.limitation}`, "");
-  } else if (v?.mode === "reproduced") {
-    lines.push(`**How it was resolved before:** outside the repository${c.resolution?.note ? ` (${c.resolution.note})` : ""}, so there is no fix in the code to restore. The rule was shown failing at \`${v.broken_revision.slice(0, 7)}\`.`, "");
-  } else if (v?.mode === "asserted") {
-    lines.push(`**Basis:** team-written and not proven against a failure. ${v.basis}`, "");
+    if (!i.fix) details.push("- The fix's lines are not shown: its commits are not in this checkout. Check out with `fetch-depth: 0` to see them.");
+    else if (fixAdded.length || fixRemoved.length) details.push("- The fix's changes in this rule's scope:", "", ...code([...fixRemoved.map((l) => `-${l.text}`), ...fixAdded.map((l) => `+${l.text}`)], ""), "");
   }
-  lines.push(`**What to do:** restore the behavior the rule describes${v?.mode === "exact" ? " (the fix above shows how it was done)" : ""}. If the rule itself should change, amend the contract in a pull request and have ${a.approver_name ?? "its owner"} approve it again; the check does not pass on a loosened rule without that approval.`);
+  details.push("- This check ran entirely in your CI. Nothing was sent to EverRule.");
+  lines.push("<details><summary>Details</summary>", "", ...details, "", "</details>");
   return { markdown: lines.join("\n"), annotations };
 }
 function explainFailures(record, contracts, messages, deps) {
@@ -5460,6 +5482,19 @@ function explainFailures(record, contracts, messages, deps) {
     annotations.push(...e.annotations);
   }
   return { markdown: parts.join("\n\n"), annotations };
+}
+function layoutSummary(status, summary, explanation) {
+  if (!explanation) return summary;
+  if (status !== "behavior_fail" && status !== "pass") return `${summary}
+
+${explanation}`;
+  return `${explanation}
+
+<details><summary>Every rule this change was checked against</summary>
+
+${summary}
+
+</details>`;
 }
 var parse = (text) => text === null ? null : parseUnifiedDiff(text);
 function safeRef(ref) {
@@ -5600,7 +5635,7 @@ approval.contract_hash ${h.contract_hash}`);
   writeFileSync3(out, JSON.stringify(record, null, 2) + "\n");
   let md = summarize(record, contracts);
   const explained = explainFailures(record, contracts, failureMessages, { diff: gitDiff, ...base ? { base } : {}, pathPrefix: gitPrefix() });
-  if (explained.markdown) md += "\n\n" + explained.markdown;
+  md = layoutSummary(record.status, md, explained.markdown);
   console.log(md);
   for (const a of explained.annotations) console.log(annotationCommand(a));
   if (process.env["GITHUB_STEP_SUMMARY"]) appendFileSync(process.env["GITHUB_STEP_SUMMARY"], md + "\n");
